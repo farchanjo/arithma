@@ -2,112 +2,103 @@
 
 # arithma
 
-**The Ultimate LLM Calculator Engine**
+### The Ultimate LLM Calculator Engine
 
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-1.0-purple.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-434-brightgreen.svg)](scripts/test_stdio.py)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-1.5-purple.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-434-brightgreen.svg)](./scripts/test_stdio.py)
+[![Binary size](https://img.shields.io/badge/binary-~3%20MB-lightgrey.svg)](#build-profiles)
+[![Tools](https://img.shields.io/badge/tools-87-success.svg)](./docs/TOOLS.md)
 
-**Precision mathematics at scale.** A pure-Rust [Model Context Protocol](https://modelcontextprotocol.io) server exposing **87 expert-grade calculator tools** designed for LLMs. Arbitrary-precision arithmetic, exact transcendentals, networking, electronics, finance, and unit conversion — all over a single stdio binary.
+A pure-Rust [**Model Context Protocol**](https://modelcontextprotocol.io) server that exposes **87 expert-grade calculator tools** to any LLM. Arbitrary-precision math, correctly-rounded transcendentals, finance, calculus, networking, electronics, unit conversion, and date/time — all behind a single static ~3 MB stdio binary.
+
+[Quick start](#quick-start) · [Integration](#integration) · [Tool catalog](#tool-catalog) · [Examples](#examples) · [Architecture](#architecture) · [Docs](#documentation)
 
 </div>
 
-## Why arithma?
-
-```mermaid
-graph LR
-    A["LLM<br/>Claude/GPT/etc"]
-    B["arithma<br/>87 Tools"]
-    C["Math"]
-    D["Finance"]
-    E["Electronics"]
-    F["Networks"]
-    G["Units"]
-    H["Precision<br/>Results"]
-    
-    A -->|calls| B
-    B --> C
-    B --> D
-    B --> E
-    B --> F
-    B --> G
-    C --> H
-    D --> H
-    E --> H
-    F --> H
-    G --> H
-    
-    style A fill:#6366f1,color:#fff
-    style B fill:#8b5cf6,color:#fff,stroke:#fff,stroke-width:3px
-    style C fill:#1e40af,color:#fff
-    style D fill:#1e40af,color:#fff
-    style E fill:#1e40af,color:#fff
-    style F fill:#1e40af,color:#fff
-    style G fill:#1e40af,color:#fff
-    style H fill:#16a34a,color:#fff,stroke:#fff,stroke-width:2px
-```
-
-## Core Strengths
-
-- **Pure Rust, zero C dependencies** — single `~3 MB` static binary for Linux, macOS, Windows
-- **Arbitrary-precision arithmetic** via [`bigdecimal`](https://crates.io/crates/bigdecimal) + [`num-bigint`](https://crates.io/crates/num-bigint) — DECIMAL128 precision, HALF_UP rounding
-- **Correctly-rounded transcendentals** via [`astro-float`](https://crates.io/crates/astro-float) — 128-bit precision for trig, log, and advanced math
-- **IANA timezone support** via [`jiff`](https://crates.io/crates/jiff) — no `libicu`, zero C deps
-- **Portable SIMD** via [`wide`](https://crates.io/crates/wide) — auto-dispatches SSE2/AVX2/AVX-512/NEON
-- **CPU optimization** — `target-cpu=native` for max speed, `release-portable` for distribution
-- **Bulletproof testing** — 434 unit + integration tests, sub-second full suite
+---
 
 ## Table of contents
 
-- [Install](#install)
-- [Build from source](#build-from-source)
-- [Wire into an MCP client](#wire-into-an-mcp-client)
-- [Tool matrix (85 tools)](#tool-matrix-85-tools)
+- [Why arithma](#why-arithma)
+- [Quick start](#quick-start)
+  - [Build profiles](#build-profiles)
+- [Integration](#integration)
+- [Tool catalog](#tool-catalog)
 - [Examples](#examples)
 - [Architecture](#architecture)
-- [Precision Guarantees](#precision-guarantees)
+- [Precision guarantees](#precision-guarantees)
 - [Development](#development)
+  - [Project layout](#project-layout)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
 - [License](#license)
 
-## Quick Start
+---
 
-### Install
+## Why arithma
+
+```mermaid
+graph LR
+    LLM["LLM<br/>Claude / GPT / ..."]
+    A["arithma<br/>87 tools · stdio"]
+    R["Precise<br/>results"]
+    LLM -- JSON-RPC --> A --> R
+    style A fill:#8b5cf6,color:#fff,stroke:#fff,stroke-width:2px
+    style LLM fill:#6366f1,color:#fff
+    style R fill:#16a34a,color:#fff
+```
+
+- **Precision first** — `BigDecimal` with DECIMAL128 semantics (34 digits, HALF_UP), 128-bit transcendentals via `astro-float`.
+- **Zero C deps** — pure Rust, single static binary for Linux, macOS, and Windows.
+- **Portable SIMD** — runtime dispatch across SSE2 / AVX2 / AVX-512 / NEON via `wide`.
+- **IANA timezones** — embedded via `jiff`, no `libicu`.
+- **Tested** — 349 unit tests + 87 stdio integration tests, full suite in under a second.
+- **Stateless** — every call is independent; safe to fan out concurrently.
+
+> [!NOTE]
+> arithma is built specifically for LLM tool-use. Every response is a compact, line-oriented string — `TOOL: OK | KEY: value | …` on success, `TOOL: ERROR\nREASON: [CODE] …` on failure — so it round-trips safely through the MCP boundary and is trivial for an LLM to parse.
+
+---
+
+## Quick start
 
 ```bash
 git clone https://github.com/farchanjo/arithma.git
 cd arithma
 cargo build --release
-# Binary: ./target/release/arithma
+./target/release/arithma   # binary: ~3 MB
 ```
 
-**Requirements**: Rust 1.94+ (pinned in `rust-toolchain.toml`)
+> [!IMPORTANT]
+> Rust **1.94+** is required (pinned in [`rust-toolchain.toml`](./rust-toolchain.toml)).
 
-### Build Profiles
+### Build profiles
 
-```bash
-# Native CPU (fastest, uses target-cpu=native via .cargo/config.toml)
-cargo build --release
+| Profile | Command | Use case |
+|:---|:---|:---|
+| **Native** | `cargo build --release` | Fastest on this machine (`target-cpu=native`). |
+| **Portable** | `RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --profile release-portable` | Haswell+/AVX2, redistributable. |
+| **Dev** | `cargo build` | Debug symbols, incremental compilation. |
 
-# Portable build (targets x86-64-v3, Haswell+, includes AVX2)
-RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --profile release-portable
-
-# Run the server directly
-./target/release/arithma
-
-# Or via cargo
-cargo run --release --bin arithma
-```
+---
 
 ## Integration
 
-### Claude Code
+<details open>
+<summary><b>Claude Code</b></summary>
 
 ```bash
 claude mcp add arithma -- /absolute/path/to/target/release/arithma
 ```
 
-### Claude Desktop / Generic MCP Client
+</details>
+
+<details>
+<summary><b>Claude Desktop / generic MCP clients</b></summary>
+
+Add the following to your client's MCP config (`mcp.json` or equivalent):
 
 ```json
 {
@@ -119,11 +110,17 @@ claude mcp add arithma -- /absolute/path/to/target/release/arithma
 }
 ```
 
-### Cursor, Windsurf, OpenCode, etc.
+</details>
 
-Same stdio interface. Point to the binary path.
+<details>
+<summary><b>Cursor, Windsurf, OpenCode</b></summary>
 
-### Verify Integration
+All of these speak the same stdio MCP protocol. Point their config at the `arithma` binary path — no extra flags required.
+
+</details>
+
+<details>
+<summary><b>Verify the server responds</b></summary>
 
 ```bash
 (printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n';
@@ -132,213 +129,210 @@ Same stdio interface. Point to the binary path.
  sleep 0.3) | ./target/release/arithma 2>/dev/null | head -c 500
 ```
 
-Should return `initialize` response + `tools/list` containing all 87 tools.
+The response must contain `tools/list` with all 87 tools.
 
-## Tool Catalog — 87 Expert Tools
+</details>
 
-| Category | Count | Examples |
-|:---|:---:|:---|
-| **Basic Math** | 7 | `add`, `subtract`, `multiply`, `divide`, `power`, `modulo`, `abs` |
-| **Scientific** | 7 | `sqrt`, `log`, `log10`, `factorial`, `sin`, `cos`, `tan` |
-| **Expression Engine** | 4 | `evaluate`, `evaluateWithVariables`, `evaluateExact`, `evaluateExactWithVariables` |
-| **Vectors & Arrays** | 4 | `sumArray`, `dotProduct`, `scaleArray`, `magnitudeArray` |
-| **Finance & Compound Interest** | 6 | `compoundInterest`, `loanPayment`, `presentValue`, `futureValueAnnuity`, `returnOnInvestment`, `amortizationSchedule` |
-| **Calculus** | 4 | `derivative`, `nthDerivative`, `definiteIntegral`, `tangentLine` |
-| **Unit Conversion** | 2 | `convert`, `convertAutoDetect` (21 categories, 118 units) |
-| **Cooking Conversions** | 3 | `convertCookingVolume`, `convertCookingWeight`, `convertOvenTemperature` |
-| **Measurement Reference** | 4 | `listCategories`, `listUnits`, `getConversionFactor`, `explainConversion` |
-| **Date & Time** | 5 | `convertTimezone`, `formatDateTime`, `currentDateTime`, `listTimezones`, `dateTimeDifference` |
-| **Tape Calculator** | 1 | `calculateWithTape` |
-| **Graphing & Roots** | 3 | `plotFunction`, `solveEquation`, `findRoots` |
-| **Networking** | 13 | `subnetCalculator`, IPv4/IPv6, CIDR, VLSM, throughput calculations |
-| **Analog Electronics** | 14 | `ohmsLaw`, resistor/capacitor/inductor combinations, filters, impedance, decibels |
-| **Digital Electronics** | 10 | `convertBase`, `twosComplement`, `grayCode`, bitwise ops, ADC/DAC, timers |
+---
+
+## Tool catalog
+
+**87 tools · 15 categories.** Full reference with inputs, outputs, and examples lives in [`docs/TOOLS.md`](./docs/TOOLS.md).
+
+| # | Category | Tools | Highlights |
+|:-:|:---|:-:|:---|
+| 1 | Basic math | 7 | `add`, `subtract`, `multiply`, `divide`, `power`, `modulo`, `abs` |
+| 2 | Scientific | 7 | `sqrt`, `log`, `log10`, `factorial`, `sin`, `cos`, `tan` |
+| 3 | Expression engine | 4 | `evaluate`, `evaluateExact`, plus variable-substitution variants |
+| 4 | Vectors & arrays | 4 | `sumArray`, `dotProduct`, `scaleArray`, `magnitudeArray` |
+| 5 | Finance | 6 | `compoundInterest`, `loanPayment`, `presentValue`, `futureValueAnnuity`, `returnOnInvestment`, `amortizationSchedule` |
+| 6 | Calculus | 4 | `derivative`, `nthDerivative`, `definiteIntegral`, `tangentLine` |
+| 7 | Unit conversion | 2 | `convert`, `convertAutoDetect` (21 categories, 118 units) |
+| 8 | Cooking | 3 | Volume, weight, oven temperature (incl. gas mark) |
+| 9 | Measure reference | 4 | `listCategories`, `listUnits`, `getConversionFactor`, `explainConversion` |
+| 10 | Date & time | 5 | Timezone conversion, formatting, differences, IANA listing |
+| 11 | Tape calculator | 1 | `calculateWithTape` with running totals |
+| 12 | Graphing & roots | 3 | `plotFunction`, `solveEquation`, `findRoots` |
+| 13 | Networking | 13 | Subnetting, VLSM, IPv4/IPv6, throughput, TCP window |
+| 14 | Analog electronics | 14 | Ohm's law, filters, impedance, resonance, 555 timers |
+| 15 | Digital electronics | 10 | Bases, two's complement, Gray code, ADC/DAC, Nyquist |
+
+---
 
 ## Examples
 
-All tool calls use the standard MCP `tools/call` JSON-RPC method. Examples of the `arguments` payload and the returned text:
+All tools use the standard MCP `tools/call` JSON-RPC method. Every response is a single string in the arithma wire format.
 
-### Arbitrary-precision arithmetic (no f64 drift)
+> [!TIP]
+> Pass numeric values as **strings** (e.g. `"0.1"`, not `0.1`) to preserve arbitrary precision across the JSON boundary.
 
-```json
-{"name": "add",    "arguments": {"first": "0.1", "second": "0.2"}}           // "0.3"
-{"name": "divide", "arguments": {"first": "10", "second": "3"}}              // "3.33333333333333333333"
+### Response format at a glance
+
+| Shape | Layout |
+|:---|:---|
+| Scalar success | `TOOL: OK \| RESULT: value` |
+| Multi-field success | `TOOL: OK \| KEY_1: v1 \| KEY_2: v2 \| …` |
+| Tabular success (block) | `TOOL: OK\n<fields>\nROW_1: k=v \| k=v\nROW_2: …` |
+| Error | `TOOL: ERROR\nREASON: [CODE] text\n[DETAIL: k=v]` |
+
+Tool names are rendered in `SCREAMING_SNAKE_CASE`. Error codes: `DOMAIN_ERROR`, `OUT_OF_RANGE`, `DIVISION_BY_ZERO`, `PARSE_ERROR`, `INVALID_INPUT`, `UNKNOWN_VARIABLE`, `UNKNOWN_FUNCTION`, `OVERFLOW`, `NOT_IMPLEMENTED`.
+
+### Real round-trips
+
+```text
+→ add             {"first":"0.1","second":"0.2"}
+← ADD: OK | RESULT: 0.3
+
+→ divide          {"first":"10","second":"3"}
+← DIVIDE: OK | RESULT: 3.33333333333333333333
+
+→ sin             {"degrees":30}
+← SIN: OK | RESULT: 0.5
+
+→ evaluateWithVariables
+  {"expression":"2*x + y","variables":"{\"x\":3,\"y\":1}"}
+← EVALUATE_WITH_VARIABLES: OK | RESULT: 7.0
+
+→ convert         {"value":"1","fromUnit":"km","toUnit":"mi","category":"LENGTH"}
+← CONVERT: OK | RESULT: 0.6213711922373339696174341843633182
+
+→ compoundInterest
+  {"principal":"1000","annualRate":"5","years":"10","compoundsPerYear":12}
+← COMPOUND_INTEREST: OK | RESULT: 1647.009497690283034841743827660086
+
+→ subnetCalculator {"address":"192.168.1.0","cidr":24}
+← SUBNET_CALCULATOR: OK | NETWORK: 192.168.1.0 | BROADCAST: 192.168.1.255
+  | MASK: 255.255.255.0 | WILDCARD: 0.0.0.255 | FIRST_HOST: 192.168.1.1
+  | LAST_HOST: 192.168.1.254 | USABLE_HOSTS: 254 | IP_CLASS: C
 ```
 
-### Exact trig at notable angles
+### Error example
 
-```json
-{"name": "sin", "arguments": {"degrees": 30}}                                // "0.5"
-{"name": "cos", "arguments": {"degrees": 60}}                                // "0.5"
-{"name": "tan", "arguments": {"degrees": 45}}                                // "1.0"
+```text
+→ divide {"first":"1","second":"0"}
+← DIVIDE: ERROR
+  REASON: [DIVISION_BY_ZERO] cannot divide by zero
 ```
 
-### Expression evaluation with variables
+Full wire-level walkthrough: [`docs/API.md`](./docs/API.md).
 
-```json
-{"name": "evaluate",              "arguments": {"expression": "2+3*4"}}                       // "14.0"
-{"name": "evaluateWithVariables", "arguments": {"expression": "2*x+y", "variables": "{\"x\":3,\"y\":1}"}} // "7.0"
-```
-
-### High-precision unit conversion
-
-```json
-{"name": "convert", "arguments": {"value": "1", "fromUnit": "km", "toUnit": "mi", "category": "LENGTH"}}
-// "0.6213711922373339696174341843633182"
-```
-
-### Financial
-
-```json
-{"name": "compoundInterest", "arguments": {"principal": "1000", "annualRate": "5", "years": "10", "compoundsPerYear": 12}}
-// "1647.009497690283034841743827660086"
-```
-
-### Networking
-
-```json
-{"name": "subnetCalculator", "arguments": {"address": "192.168.1.0", "cidr": 24}}
-// {"network":"192.168.1.0","broadcast":"192.168.1.255","mask":"255.255.255.0",
-//  "wildcard":"0.0.0.255","firstHost":"192.168.1.1","lastHost":"192.168.1.254",
-//  "usableHosts":254,"ipClass":"C"}
-```
-
-### Calculus
-
-```json
-{"name": "definiteIntegral", "arguments": {"expression": "x^2", "variable": "x", "lower": 0, "upper": 1}}
-// "0.3333333333500001"
-```
+---
 
 ## Architecture
 
 ```mermaid
 graph TB
-    subgraph stdlib["Standard Library (Rust Core)"]
-        Std["std, alloc, core"]
-    end
-    
-    subgraph deps["Pure Rust Dependencies"]
-        RMCP["rmcp 1.0<br/>(MCP Protocol)"]
-        Tokio["tokio<br/>(async/stdio)"]
-        BigDecimal["bigdecimal +<br/>num-bigint"]
-        AstroFloat["astro-float<br/>(128-bit precision)"]
-        Jiff["jiff<br/>(IANA timezones)"]
-        Wide["wide<br/>(Portable SIMD)"]
-    end
-    
-    subgraph arithma_core["arithma Library"]
-        Engine["engine/"]
-        Tools["tools/<br/>(87 tools)"]
-        Server["server.rs<br/>(tool_router)"]
-    end
-    
-    subgraph arithma_bin["arithma Binary"]
-        Main["main.rs<br/>(stdio transport)"]
-    end
-    
-    Std --> deps
-    deps --> arithma_core
-    arithma_core --> arithma_bin
-    
-    style arithma_bin fill:#8b5cf6,color:#fff,stroke:#fff,stroke-width:2px
-    style RMCP fill:#6366f1,color:#fff
-    style Tokio fill:#6366f1,color:#fff
-    style Engine fill:#1e40af,color:#fff
+    Client["MCP client<br/>(Claude / Cursor / ...)"]
+    Main["main.rs<br/>Tokio + stdio"]
+    Server["server.rs<br/>#[tool_router] — 87 tools"]
+    Tools["tools/*<br/>15 category modules"]
+    Engine["engine/*<br/>expression · units · BigDecimal"]
+
+    Client -- JSON-RPC --> Main --> Server --> Tools --> Engine
+
+    style Main fill:#8b5cf6,color:#fff,stroke:#fff,stroke-width:2px
+    style Server fill:#6366f1,color:#fff
     style Tools fill:#1e40af,color:#fff
-    style Server fill:#1e40af,color:#fff
+    style Engine fill:#1e40af,color:#fff
 ```
 
-**One static binary**, zero C dependencies, cross-platform.
-
-**Production Dependencies** (all pure Rust, zero C FFI):
-
-| Crate | Purpose |
+| Crate | Role |
 |:---|:---|
-| `rmcp` (1.0) | Official Rust MCP SDK — protocol + serialization |
-| `tokio` | Async runtime with multi-threaded executor for stdio I/O |
-| `bigdecimal` + `num-bigint` | Arbitrary-precision arithmetic with DECIMAL128 semantics |
-| `astro-float` | 128-bit float with correctly-rounded transcendentals |
-| `jiff` | Timezone-aware datetime with embedded IANA data (no `libicu`) |
-| `wide` | Portable SIMD with runtime dispatch (SSE2/AVX2/AVX-512/NEON) |
-| `serde` + `serde_json` | JSON serialization for MCP protocol |
-| `schemars` | JSON Schema generation for tool parameters |
-| `tracing` + `tracing-subscriber` | Structured logging to stderr (keeps stdout/stdio clean) |
+| [`rmcp`](https://crates.io/crates/rmcp) | Official Rust MCP SDK (protocol + schema). |
+| [`tokio`](https://crates.io/crates/tokio) | Multi-threaded async runtime for stdio I/O. |
+| [`bigdecimal`](https://crates.io/crates/bigdecimal) + [`num-bigint`](https://crates.io/crates/num-bigint) | Arbitrary-precision arithmetic (DECIMAL128). |
+| [`astro-float`](https://crates.io/crates/astro-float) | 128-bit, correctly-rounded transcendentals. |
+| [`jiff`](https://crates.io/crates/jiff) | IANA timezones, embedded database. |
+| [`wide`](https://crates.io/crates/wide) | Portable SIMD dispatch. |
+| [`tracing`](https://crates.io/crates/tracing) | Structured logging to stderr (stdout stays clean). |
 
-## Precision Guarantees
+Deep dive: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
-arithma delivers **production-grade precision** across all 87 tools with consistent, predictable behavior.
+---
+
+## Precision guarantees
 
 | Domain | Precision | Method |
 |:---|:---|:---|
-| **Basic Math** | Exact | `BigDecimal` (arbitrary precision) |
-| **Division** | 20 decimal places | HALF_UP rounding per DECIMAL128 |
-| **Scientific (sin, cos, tan, log)** | Exact at notable angles | Lookup tables; astro-float elsewhere |
-| **Factorial** | 0–20 range | Exact `u64` values |
-| **Unit Conversion** | 34 significant digits | DECIMAL128 precision factors |
-| **Financial** | DECIMAL128 context | Compound interest, amortization, IRR |
-| **Electronics** | 128-bit float | Impedance, Q-factor, decibels |
-| **Date/Time** | IANA standard | Embedded timezone database, leap seconds |
+| Basic arithmetic | Exact | `BigDecimal` |
+| Division | 20 decimal places | HALF_UP per DECIMAL128 |
+| `sin` / `cos` / `tan` | Exact at 0/30/45/60/90° | Lookup + `astro-float` fallback |
+| `factorial` | Exact for `n ∈ [0, 20]` | `u64` table |
+| `evaluate` | ~15–17 digits | `f64` fast path |
+| `evaluateExact` | ~34 digits | 128-bit `astro-float` |
+| Unit conversion | 34 digits | DECIMAL128 factors |
+| Financial | 34 digits | DECIMAL128 context |
+| Date / Time | IANA standard | Embedded tz database |
 
-**Error Messages**: Clear, actionable error text for debugging and user feedback.
+> [!WARNING]
+> The fast `evaluate` path uses `f64` for speed and is subject to standard IEEE-754 rounding. Use `evaluateExact` when you need 128-bit precision.
 
-## Development & Testing
+---
+
+## Development
 
 ```bash
-# Format check
 cargo fmt --check
-
-# Lint (all targets, warnings as errors)
 cargo clippy --all-targets --all-features -- -D warnings
-
-# Run unit tests
-cargo test --lib
-
-# Full integration test (87 tools via stdio)
-python3 scripts/test_stdio.py
-
-# Release build
-cargo build --release
+cargo test --lib                 # 349 unit tests
+python3 scripts/test_stdio.py    # 87 stdio integration tests
 ```
 
-All tests pass in under 1 second. CI enforces format, lint, and test pass before merge.
+All four must pass before committing. See [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) for layout, conventions, and the contribution workflow.
 
-### Project Layout
+### Project layout
 
 ```
 arithma/
-├── .cargo/config.toml              ← Cargo settings, target-cpu=native
-├── clippy.toml                     ← Linter configuration
-├── rust-toolchain.toml             ← Rust 1.94+ requirement
-├── Cargo.toml                      ← Dependencies, build profiles
+├── Cargo.toml                   Dependencies, lint + release profiles
+├── rust-toolchain.toml          Rust 1.94+ pin
 ├── src/
-│   ├── main.rs                     ← Binary entry (stdio MCP server)
-│   ├── lib.rs                      ← Library exports
-│   ├── server.rs                   ← #[tool_router] — all 87 tools
-│   ├── engine/                     ← Expression parser, unit registry
-│   └── tools/                      ← 15 modules, one per tool category
-├── scripts/
-│   └── test_stdio.py               ← Integration test (87 tools in ~0.5s)
-├── arithma-logo.svg                ← Branding
-└── target/release/arithma          ← Final binary (~3 MB)
+│   ├── main.rs                  Binary entry, stdio MCP transport
+│   ├── lib.rs                   Library exports
+│   ├── server.rs                #[tool_router] — all 87 tools
+│   ├── engine/                  Expression parser, unit registry, BigDecimal helpers
+│   ├── mcp/                     MCP message helpers
+│   └── tools/                   15 category modules
+├── scripts/test_stdio.py        Full stdio integration test
+└── docs/                        INDEX · ARCHITECTURE · TOOLS · DEVELOPMENT · API
 ```
 
 ---
 
-## License
+## Documentation
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+| Doc | Purpose |
+|:---|:---|
+| [`docs/INDEX.md`](./docs/INDEX.md) | Navigation starting point. |
+| [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Module layout, data flow, design decisions. |
+| [`docs/TOOLS.md`](./docs/TOOLS.md) | Every tool: inputs, outputs, examples. |
+| [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) | Build, test, lint, contribute. |
+| [`docs/API.md`](./docs/API.md) | MCP integration and calling conventions. |
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. Maintain:
-- ✅ Code formatting (`cargo fmt`)
-- ✅ Zero clippy warnings (`cargo clippy -- -D warnings`)
-- ✅ All tests passing (`cargo test`)
-- ✅ Numerical accuracy across all 87 tools
+Issues and PRs welcome. Keep the workflow green:
+
+- [x] `cargo fmt` — formatted.
+- [x] `cargo clippy --all-targets -- -D warnings` — zero warnings.
+- [x] `cargo test --lib` — all unit tests pass.
+- [x] `python3 scripts/test_stdio.py` — all 87 stdio tests pass.
+- [x] en-US only in code, commits, and docs.
+
+Use the [Angular commit format](https://github.com/angular/angular/blob/main/CONTRIBUTING.md#commit): `<type>(<scope>): <subject>`.
 
 ---
 
-**Built by** [@farchanjo](https://github.com/farchanjo) | **Contact**: [fabricio@archanjo.com](mailto:fabricio@archanjo.com)
+## License
+
+Licensed under the [Apache License, Version 2.0](./LICENSE).
+
+---
+
+<div align="center">
+
+**Built by** [@farchanjo](https://github.com/farchanjo) · [fabricio@archanjo.com](mailto:fabricio@archanjo.com)
+
+</div>
