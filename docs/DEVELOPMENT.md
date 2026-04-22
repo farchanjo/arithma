@@ -1,247 +1,171 @@
 # Development Guide
 
-Complete guide for building, testing, and contributing to arithma.
+Build, test, lint, and contribute to arithma.
+
+## Prerequisites
+
+- **Rust 1.94+** (pinned in [`rust-toolchain.toml`](../rust-toolchain.toml))
+- **Cargo** (ships with Rust)
+- **Python 3.9+** (only for the stdio integration tests)
 
 ## Building
-
-### Prerequisites
-
-- **Rust 1.94+** (pinned in `rust-toolchain.toml`)
-- **Cargo** (comes with Rust)
-- **Python 3.9+** (for integration tests)
-
-### Quick Start
 
 ```bash
 git clone https://github.com/farchanjo/arithma.git
 cd arithma
 cargo build --release
-# Binary: ./target/release/arithma
+# → ./target/release/arithma (~3 MB, fully static)
 ```
 
-### Build Profiles
+### Profiles
+
+| Profile | Command | Notes |
+|:---|:---|:---|
+| Native | `cargo build --release` | Fastest; uses `target-cpu=native` via `.cargo/config.toml`. |
+| Portable | `RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --profile release-portable` | Haswell+ / AVX2, redistributable. |
+| Dev | `cargo build` | Debug symbols, incremental. |
+
+### Extra slimming (optional)
 
 ```bash
-# Native CPU (fastest on this machine)
-cargo build --release
-
-# Portable build (targets x86-64-v3: Haswell+, includes AVX2)
-RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --profile release-portable
-
-# Development (with debug symbols, slower)
-cargo build
-
-# Run directly
-cargo run --release --bin arithma
-```
-
-### Minimum Binary Size
-
-The release binary is ~3 MB statically-linked. Optimize further with:
-
-```bash
-cargo build --release -C lto=fat -C codegen-units=1 -C strip=symbols
-# Result: ~2 MB
+RUSTFLAGS="-C lto=fat -C codegen-units=1 -C strip=symbols" cargo build --release
 ```
 
 ## Testing
 
-### Unit Tests (349 tests)
+| Scope | Command | Coverage |
+|:---|:---|:---|
+| Unit | `cargo test --lib` | 349 tests — parsers, units, helpers, each tool. |
+| Stdio integration | `python3 scripts/test_stdio.py` | All 87 tools via full JSON-RPC round trips. |
+| Full suite | `cargo test --all` | Unit + doctests. |
+| Single tool module | `cargo test --lib unit_converter::tests` | |
+| Single test | `cargo test --lib convert_length` | |
+
+The full suite runs in under a second; there is no excuse for merging red tests.
+
+## Lint & format
 
 ```bash
-cargo test --lib
-```
-
-Runs all internal tests: expression parser, unit registry, BigDecimal helpers, etc.
-
-### Integration Tests (87 tools)
-
-```bash
-python3 scripts/test_stdio.py
-```
-
-Tests all 87 tools via JSON-RPC stdio protocol. Takes ~0.5 seconds.
-
-### Full Test Suite
-
-```bash
-cargo test --all
-```
-
-Includes unit + doctests.
-
-### Running Specific Tests
-
-```bash
-# Test a specific tool module
-cargo test --lib unit_converter::tests
-
-# Run a single test
-cargo test --lib convert_length
-```
-
-## Linting & Formatting
-
-### Format Check
-
-```bash
-cargo fmt --check
-```
-
-### Auto-Format
-
-```bash
-cargo fmt
-```
-
-### Lint (Clippy)
-
-```bash
+cargo fmt --check                               # format check
+cargo fmt                                       # auto-fix
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Treats all warnings as errors (deny mode).
+`Cargo.toml` enables `deny` on the full `clippy::all`, `clippy::pedantic`, and `clippy::nursery` sets.
 
-### Pre-Commit Workflow
+### Pre-commit sequence
 
 ```bash
-# 1. Format
-cargo fmt
-
-# 2. Lint
-cargo clippy --all-targets -- -D warnings
-
-# 3. Test
-cargo test --lib
-
-# 4. Integration test
-python3 scripts/test_stdio.py
+cargo fmt                                       \
+  && cargo clippy --all-targets -- -D warnings  \
+  && cargo test --lib                           \
+  && python3 scripts/test_stdio.py
 ```
 
-All must pass before committing.
+Everything must pass. If a step fails, fix the root cause — do not bypass.
 
-## Project Structure
+> **PMD / rulesets**: never modify linting rulesets to silence a failure. Fix the code instead.
+
+## Project structure
 
 ```
 .
-├── Cargo.toml                    # Package metadata, dependencies
-├── rust-toolchain.toml           # Rust 1.94+ requirement
-├── .cargo/config.toml            # Cargo aliases, target-cpu=native
-├── clippy.toml                   # Linter configuration
+├── Cargo.toml                     Dependencies, lint + release profiles
+├── rust-toolchain.toml            Rust 1.94+ pin
+├── clippy.toml                    Clippy tweaks
+├── .cargo/config.toml             Cargo aliases, target-cpu=native
 ├── src/
-│   ├── main.rs                   # Binary entry, stdio transport
-│   ├── lib.rs                    # Library exports
-│   ├── server.rs                 # MCP tool registration (#[tool_router])
+│   ├── main.rs                    Binary entry, stdio transport
+│   ├── lib.rs                     Library exports
+│   ├── server.rs                  #[tool_router] — all 87 tools
 │   ├── engine/
-│   │   ├── mod.rs                # Module documentation
-│   │   ├── expression.rs         # Parser + evaluator (f64)
-│   │   ├── expression_exact.rs   # High-precision evaluator (f128)
-│   │   ├── unit_registry.rs      # 21 categories, 118 units
-│   │   └── bigdecimal_ext.rs     # DECIMAL128 helpers
-│   └── tools/                    # 15 tool modules
-│       ├── mod.rs
-│       ├── basic.rs              # add, subtract, multiply, etc.
-│       ├── scientific.rs         # sin, cos, tan, log, sqrt, etc.
-│       ├── vector.rs             # sum, dot product, scale, magnitude
-│       ├── financial.rs          # compound interest, loans, etc.
-│       ├── calculus.rs           # derivative, integral, tangent
-│       ├── unit_converter.rs     # convert, convertAutoDetect
-│       ├── cooking.rs            # Cooking-specific conversions
-│       ├── measure_reference.rs  # listCategories, listUnits, etc.
-│       ├── datetime.rs           # Timezone-aware date/time
-│       ├── printing.rs           # Tape calculator
-│       ├── graphing.rs           # Plot, solve, findRoots
-│       ├── network.rs            # IPv4/IPv6, CIDR, VLSM
-│       ├── analog_electronics.rs # Ohm's law, impedance, filters
-│       ├── digital_electronics.rs # Bases, gates, timers, ADC/DAC
-│       └── programmable.rs       # Expression evaluation with vars
-├── scripts/
-│   └── test_stdio.py             # Full integration test (87 tools)
-├── docs/
-│   ├── INDEX.md                  # Documentation index
-│   ├── ARCHITECTURE.md           # System design
-│   ├── TOOLS.md                  # 87-tool reference
-│   ├── DEVELOPMENT.md            # This file
-│   └── API.md                    # MCP integration guide
-└── target/release/arithma        # Final binary
+│   │   ├── expression.rs          Parser + f64 evaluator
+│   │   ├── expression_exact.rs    Parser + 128-bit evaluator
+│   │   ├── unit_registry.rs       21 categories, 118 units
+│   │   └── bigdecimal_ext.rs      DECIMAL128 context, formatters
+│   ├── mcp/                       MCP message helpers
+│   └── tools/                     15 category modules
+│       ├── basic.rs
+│       ├── scientific.rs
+│       ├── programmable.rs
+│       ├── vector.rs
+│       ├── financial.rs
+│       ├── calculus.rs
+│       ├── unit_converter.rs
+│       ├── cooking.rs
+│       ├── measure_reference.rs
+│       ├── datetime.rs
+│       ├── printing.rs
+│       ├── graphing.rs
+│       ├── network.rs
+│       ├── analog_electronics.rs
+│       └── digital_electronics.rs
+├── scripts/test_stdio.py          Integration test (87 tools)
+├── docs/                          INDEX · ARCHITECTURE · TOOLS · DEVELOPMENT · API
+└── target/release/arithma         Final binary
 ```
 
-## Code Conventions
+## Code conventions
 
 ### Naming
 
-- **Crate**: `arithma` (binary), `math_calc` (library)
-- **Modules**: lowercase (e.g., `basic`, `unit_registry`)
-- **Functions**: snake_case (e.g., `convert_units`)
-- **Types**: PascalCase (e.g., `UnitCategory`, `UnitError`)
-- **Constants**: SCREAMING_SNAKE_CASE (e.g., `FACTOR_SCALE`)
+| Kind | Style | Example |
+|:---|:---|:---|
+| Crates | `snake_case` | `arithma` (bin), `math_calc` (lib) |
+| Modules | lowercase | `basic`, `unit_registry` |
+| Functions | `snake_case` | `convert_units` |
+| Types | `PascalCase` | `UnitCategory`, `UnitError` |
+| Constants | `SCREAMING_SNAKE_CASE` | `FACTOR_SCALE` |
 
-### Function Signatures
+### Tool function signature
 
-All tool functions follow the MCP pattern:
+Every tool returns a `String` built through the shared response builder in `src/mcp/message/builder.rs`:
 
 ```rust
+use crate::mcp::message::{Response, ErrorCode, error_with_detail};
+
 pub fn tool_name(param1: String, param2: i32) -> String {
-    // Return result or error as String
-    format!("{}", result)
-    // or:
-    format!("Error: {}", error_msg)
-}
-```
+    match compute(&param1, param2) {
+        Ok(result) => Response::ok("TOOL_NAME").result(result.to_string()).build(),
+        // → "TOOL_NAME: OK | RESULT: <value>"
 
-### Error Handling
-
-- Use `Result<T, E>` internally
-- Convert to `String` for MCP boundary
-- Never panic; return `"Error: ..."` instead
-
-### Module Documentation
-
-Every module has a doc comment:
-
-```rust
-//! Brief description.
-//!
-//! Longer explanation of purpose, invariants, and design.
-```
-
-### Test Organization
-
-Tests live inline with code:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_name() {
-        assert_eq!(function(), expected);
+        Err(ComputeError::BadUnit(u)) => error_with_detail(
+            "TOOL_NAME",
+            ErrorCode::InvalidInput,
+            "unit is not a recognized unit",
+            &format!("unit={u}"),
+        ),
+        // → "TOOL_NAME: ERROR\nREASON: [INVALID_INPUT] unit is not a recognized unit\nDETAIL: unit=<u>"
     }
 }
 ```
 
-## Dependency Management
+**Rules of the envelope:**
 
-### Current Versions
+- Tool and key names are `SCREAMING_SNAKE_CASE`.
+- Scalar success: `.result(value)` → `TOOL: OK | RESULT: value`. Prefer this over `.field("RESULT", value)`.
+- Multi-field success: chain `.field(key, value)` calls.
+- Tabular payloads: opt in with `.block()` and emit repeated keys like `ROW_1`, `ROW_2`, ….
+- Errors: use one of the canonical `ErrorCode` variants. Add a `DETAIL` line when it helps the caller diagnose (unit name, received value, etc.).
 
-See `Cargo.toml` for exact versions. Key dependencies:
+### Rules of thumb
 
-- **rmcp** — Rust MCP SDK
-- **tokio** — Async runtime
-- **bigdecimal** — Arbitrary precision
-- **astro-float** — 128-bit transcendentals
-- **jiff** — Timezone support
-- **wide** — Portable SIMD
+- **Never panic.** Return `Result<T, E>` internally and route the failure through `mcp::message::error` / `error_with_detail` — never hand-roll an error string.
+- **Methods under 30 lines.** Extract helpers when they grow.
+- **No dead code, no duplication.** Clippy enforces most of this.
+- **Document the WHY, not the WHAT.** If a comment restates the code, delete it.
+- **Cache lookup tables with `LazyLock`** — never rebuild on each call.
+- **Don't mix precision contexts.** Stay inside DECIMAL128, or stay inside `f64`. Choose per path.
+- **No f64/f32 in financial or unit paths.** Use `BigDecimal`.
 
-### Adding Dependencies
+### Adding a dependency
 
-Before adding a dependency:
+Before adding anything:
 
-1. **Verify it's pure Rust** (no C FFI)
-2. **Check licensing** (must be compatible with Apache-2.0)
-3. **Test compilation** on macOS, Linux, Windows
-4. **Update documentation** if it changes architecture
+1. Pure Rust only (no C FFI) — keeps the binary portable and the build trivial.
+2. License-compatible with Apache-2.0.
+3. Test compilation on macOS, Linux, and Windows.
+4. If it changes architecture, update [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ```bash
 cargo add <crate> --vers ^X.Y.Z
@@ -249,26 +173,16 @@ cargo add <crate> --vers ^X.Y.Z
 
 ## Debugging
 
-### Logging
+### Structured logging
 
-The server logs to stderr with `tracing`. Control with `RUST_LOG`:
+The server uses `tracing` and logs to **stderr** (never stdout — stdio transport requires a clean stdout).
 
 ```bash
-RUST_LOG=debug ./target/release/arithma
+RUST_LOG=debug           ./target/release/arithma
 RUST_LOG=math_calc=trace ./target/release/arithma
 ```
 
-### Debugging in IDE
-
-JetBrains Rust plugin supports native debugging. Set breakpoints and run:
-
-```bash
-cargo run --bin arithma
-```
-
-### Manual Testing
-
-Test a tool manually via JSON-RPC:
+### Manual tool invocation
 
 ```bash
 (echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}';
@@ -281,54 +195,33 @@ Test a tool manually via JSON-RPC:
 
 ### Workflow
 
-1. **Fork** the repository
-2. **Create a branch** off `main`: `git checkout -b fix/description`
-3. **Make changes** (format, lint, test locally)
-4. **Commit** with Angular format: `fix(scope): description`
-5. **Push** and open a PR
+1. Fork the repo.
+2. Branch off `main`: `git checkout -b fix/short-description`.
+3. Make the change; run the pre-commit sequence above.
+4. Commit using the [Angular format](https://github.com/angular/angular/blob/main/CONTRIBUTING.md#commit): `<type>(<scope>): <subject>`.
+5. Push and open a PR.
 
-### Commit Messages
-
-Use [Angular Commit Format](https://github.com/angular/angular/blob/main/CONTRIBUTING.md#commit):
+### Commit template
 
 ```
 <type>(<scope>): <subject>
 
-<body>
+<body — why, not what>
 
-<footer>
+<footer — issue refs, breaking changes>
 ```
 
-**Types**: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `style`
+**Types**: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `style`.
 
-**Example**:
-```
-fix(unit_converter): handle temperature precision loss
+### Checklist for reviewers
 
-Use DECIMAL128 context for Celsius pivot to prevent rounding errors
-in Fahrenheit-to-Kelvin conversions.
-
-Fixes #42
-```
-
-### What Gets Reviewed
-
-- ✅ Code formatting (`cargo fmt`)
-- ✅ Lint passes (`cargo clippy`)
-- ✅ All tests pass
-- ✅ No panics (use `Result` instead)
-- ✅ Documentation updated
-- ✅ English (en-US) only
-
-### Performance Considerations
-
-arithma prioritizes **correctness over speed**, but:
-
-- Use BigDecimal only where precision matters
-- Cache lookup tables in `LazyLock` (not recreated per call)
-- Avoid allocations in tight loops
-- Profile with `cargo bench` before optimizing
+- Formatted (`cargo fmt`).
+- Lint-clean (`cargo clippy -- -D warnings`).
+- All tests pass (unit + stdio integration).
+- No new panics; errors flow through `mcp::message::error*` with a canonical `ErrorCode`.
+- Docs updated when behavior or interfaces change.
+- en-US only.
 
 ---
 
-See [Architecture](./ARCHITECTURE.md) for system design details.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for system design and [TOOLS.md](./TOOLS.md) for per-tool specs.
