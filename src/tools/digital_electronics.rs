@@ -359,6 +359,30 @@ pub fn timer_555_astable(r1: &str, r2: &str, c: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if r1_v.is_zero() || r1_v.is_negative() {
+        return error_with_detail(
+            TIMER_555_ASTABLE,
+            ErrorCode::InvalidInput,
+            "r1 must be positive",
+            &format!("r1={r1}"),
+        );
+    }
+    if r2_v.is_zero() || r2_v.is_negative() {
+        return error_with_detail(
+            TIMER_555_ASTABLE,
+            ErrorCode::InvalidInput,
+            "r2 must be positive",
+            &format!("r2={r2}"),
+        );
+    }
+    if c_v.is_zero() || c_v.is_negative() {
+        return error_with_detail(
+            TIMER_555_ASTABLE,
+            ErrorCode::InvalidInput,
+            "c must be positive",
+            &format!("c={c}"),
+        );
+    }
     let two = BigDecimal::from(2);
     let r1_plus_2r2 = add_ctx(&r1_v, &mul_ctx(&r2_v, &two));
     let denominator = mul_ctx(&r1_plus_2r2, &c_v);
@@ -406,6 +430,22 @@ pub fn timer_555_monostable(r: &str, c: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if r_v.is_zero() || r_v.is_negative() {
+        return error_with_detail(
+            TIMER_555_MONOSTABLE,
+            ErrorCode::InvalidInput,
+            "r must be positive",
+            &format!("r={r}"),
+        );
+    }
+    if c_v.is_zero() || c_v.is_negative() {
+        return error_with_detail(
+            TIMER_555_MONOSTABLE,
+            ErrorCode::InvalidInput,
+            "c must be positive",
+            &format!("c={c}"),
+        );
+    }
     let constant: BigDecimal = "1.1".parse().expect("valid constant");
     let pulse = mul_ctx(&mul_ctx(&constant, &r_v), &c_v);
     Response::ok(TIMER_555_MONOSTABLE)
@@ -728,6 +768,38 @@ mod tests {
         assert_eq!(
             timer_555_monostable("1000", "0.000001"),
             "TIMER_555_MONOSTABLE: OK | PULSE_WIDTH: 0.0011"
+        );
+    }
+
+    #[test]
+    fn timer_555_astable_rejects_zero_r1() {
+        assert_eq!(
+            timer_555_astable("0", "1000", "0.000001"),
+            "TIMER_555_ASTABLE: ERROR\nREASON: [INVALID_INPUT] r1 must be positive\nDETAIL: r1=0"
+        );
+    }
+
+    #[test]
+    fn timer_555_astable_rejects_negative_r2() {
+        assert_eq!(
+            timer_555_astable("1000", "-5", "0.000001"),
+            "TIMER_555_ASTABLE: ERROR\nREASON: [INVALID_INPUT] r2 must be positive\nDETAIL: r2=-5"
+        );
+    }
+
+    #[test]
+    fn timer_555_monostable_rejects_negative_c() {
+        assert_eq!(
+            timer_555_monostable("1000", "-0.000001"),
+            "TIMER_555_MONOSTABLE: ERROR\nREASON: [INVALID_INPUT] c must be positive\nDETAIL: c=-0.000001"
+        );
+    }
+
+    #[test]
+    fn timer_555_monostable_rejects_zero_r() {
+        assert_eq!(
+            timer_555_monostable("0", "0.000001"),
+            "TIMER_555_MONOSTABLE: ERROR\nREASON: [INVALID_INPUT] r must be positive\nDETAIL: r=0"
         );
     }
 
