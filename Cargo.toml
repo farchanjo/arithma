@@ -1,14 +1,14 @@
 [package]
-name = "math-calc-mcp"
+name = "arithma"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
-authors = ["Fabricio Archanjo <farchanjo@gmail.com>"]
-description = "Pure-Rust MCP server exposing 85 math, engineering and conversion tools over stdio. Arbitrary-precision arithmetic, portable SIMD, IANA-aware datetime."
+authors = ["Fabricio Archanjo <fabricio@archanjo.com>"]
+description = "The Ultimate LLM Calculator Engine — 87 precision math tools via MCP. Pure Rust, zero C deps, arbitrary-precision arithmetic, finance, electronics, networking."
 license = "Apache-2.0"
-repository = "https://github.com/farchanjo/math-calc-mcp"
-homepage = "https://github.com/farchanjo/math-calc-mcp"
-documentation = "https://github.com/farchanjo/math-calc-mcp#readme"
+repository = "https://github.com/farchanjo/arithma"
+homepage = "https://github.com/farchanjo/arithma"
+documentation = "https://github.com/farchanjo/arithma#readme"
 readme = "README.md"
 keywords = ["mcp", "calculator", "math", "stdio", "anthropic"]
 categories = ["command-line-utilities", "mathematics", "science"]
@@ -29,7 +29,7 @@ name = "math_calc"
 path = "src/lib.rs"
 
 [[bin]]
-name = "math-calc-mcp"
+name = "arithma"
 path = "src/main.rs"
 
 [dependencies]
