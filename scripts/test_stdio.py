@@ -426,6 +426,26 @@ def test_calculus(r: TestRunner) -> None:
             detail_render=lambda v: f"slope={envelope_field(v, 'SLOPE')}, "
                                     f"intercept={envelope_field(v, 'INTERCEPT')}")
 
+    # Regression: derivative/nthDerivative/tangentLine used to quietly return
+    # huge spurious values at singularities because central differences only
+    # sample point±h. e.g. d/dx(1/x) at x=0 used to yield ~1.25e12.
+    r.check("derivative", "1/x at 0 -> DOMAIN_ERROR",
+            c("derivative", {"expression": "1/x", "variable": "x", "point": 0.0}),
+            lambda v: envelope_error(v, "DERIVATIVE", "DOMAIN_ERROR")
+                      and "function is not defined" in (envelope_field(v, "REASON") or ""))
+    r.check("nthDerivative", "1/x at 0 order=2 -> DOMAIN_ERROR",
+            c("nthDerivative", {"expression": "1/x", "variable": "x",
+                                "point": 0.0, "order": 2}),
+            lambda v: envelope_error(v, "NTH_DERIVATIVE", "DOMAIN_ERROR"))
+    r.check("tangentLine", "1/x at 0 -> DOMAIN_ERROR",
+            c("tangentLine", {"expression": "1/x", "variable": "x", "point": 0.0}),
+            lambda v: envelope_error(v, "TANGENT_LINE", "DOMAIN_ERROR"))
+    # Sanity: derivative near (but not at) the singularity must still work.
+    r.check("derivative", "1/x at 1 -> -1",
+            c("derivative", {"expression": "1/x", "variable": "x", "point": 1.0}),
+            lambda v: envelope_ok(v, "DERIVATIVE")
+                      and TestRunner.close(envelope_result(v, "DERIVATIVE"), -1.0, 1e-4))
+
 
 def test_unit_converter(r: TestRunner) -> None:
     r.category("unit converter", 2)
@@ -437,6 +457,40 @@ def test_unit_converter(r: TestRunner) -> None:
     r.check("convertAutoDetect", "100c->f", c("convertAutoDetect", {
         "value": "100", "fromUnit": "c", "toUnit": "f"
     }), lambda v: TestRunner.close(envelope_result(v, "CONVERT_AUTO_DETECT"), 212.0, 1e-6))
+
+    # Regression: physical quantities (length, mass, volume, area, density,
+    # time, data storage/rate, frequency, R/L/C) must reject negatives.
+    # Signed categories (temperature, voltage, current, speed, energy, force,
+    # power, pressure, angle) must still allow negative values.
+    r.check("convert", "negative length -> INVALID_INPUT",
+            c("convert", {"value": "-100", "fromUnit": "km",
+                          "toUnit": "mi", "category": "LENGTH"}),
+            lambda v: envelope_error(v, "CONVERT", "INVALID_INPUT")
+                      and "value must not be negative" in (envelope_field(v, "REASON") or "")
+                      and envelope_field(v, "DETAIL") == "value=-100, category=LENGTH")
+    r.check("convert", "negative mass -> INVALID_INPUT",
+            c("convert", {"value": "-5", "fromUnit": "kg",
+                          "toUnit": "g", "category": "MASS"}),
+            lambda v: envelope_error(v, "CONVERT", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "value=-5, category=MASS")
+    r.check("convert", "negative temperature -> OK",
+            c("convert", {"value": "-40", "fromUnit": "c",
+                          "toUnit": "f", "category": "TEMPERATURE"}),
+            lambda v: envelope_ok(v, "CONVERT")
+                      and envelope_field(v, "RESULT") == "-40")
+    r.check("convert", "negative voltage -> OK",
+            c("convert", {"value": "-5", "fromUnit": "vlt",
+                          "toUnit": "mvlt", "category": "VOLTAGE"}),
+            lambda v: envelope_ok(v, "CONVERT"))
+    r.check("convertAutoDetect", "negative length -> INVALID_INPUT",
+            c("convertAutoDetect", {"value": "-10", "fromUnit": "km",
+                                    "toUnit": "mi"}),
+            lambda v: envelope_error(v, "CONVERT_AUTO_DETECT", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "value=-10, category=LENGTH")
+    r.check("convertAutoDetect", "negative celsius -> OK",
+            c("convertAutoDetect", {"value": "-10", "fromUnit": "c",
+                                    "toUnit": "f"}),
+            lambda v: envelope_ok(v, "CONVERT_AUTO_DETECT"))
 
 
 def test_cooking(r: TestRunner) -> None:
@@ -451,6 +505,30 @@ def test_cooking(r: TestRunner) -> None:
     r.check("convertOvenTemperature", "gasmark 4 -> c", c("convertOvenTemperature", {
         "value": "4", "fromUnit": "gasmark", "toUnit": "c"
     }), lambda v: TestRunner.close(envelope_result(v, "CONVERT_OVEN_TEMPERATURE"), 180.0, 1e-6))
+
+    # Regression: cooking measurements are strictly non-negative. Negative
+    # values used to silently round-trip through the unit registry (e.g.
+    # -1 cup → -236.59 ml).
+    r.check("convertCookingVolume", "negative value -> INVALID_INPUT",
+            c("convertCookingVolume", {"value": "-1",
+                                       "fromUnit": "cup",
+                                       "toUnit": "ml"}),
+            lambda v: envelope_error(v, "CONVERT_COOKING_VOLUME", "INVALID_INPUT")
+                      and "value must not be negative" in (envelope_field(v, "REASON") or "")
+                      and envelope_field(v, "DETAIL") == "value=-1")
+    r.check("convertCookingWeight", "negative value -> INVALID_INPUT",
+            c("convertCookingWeight", {"value": "-5",
+                                       "fromUnit": "kg",
+                                       "toUnit": "g"}),
+            lambda v: envelope_error(v, "CONVERT_COOKING_WEIGHT", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "value=-5")
+    # Oven temperature must remain permissive: -10°C → 14°F is valid.
+    r.check("convertOvenTemperature", "negative celsius allowed",
+            c("convertOvenTemperature", {"value": "-10",
+                                         "fromUnit": "c",
+                                         "toUnit": "f"}),
+            lambda v: envelope_ok(v, "CONVERT_OVEN_TEMPERATURE")
+                      and envelope_field(v, "RESULT") == "14")
 
 
 def test_measure_reference(r: TestRunner) -> None:
@@ -941,6 +1019,28 @@ def test_analog(r: TestRunner) -> None:
             c("wheatstoneBridge", {"r1": "100", "r2": "200", "r3": "-300"}),
             lambda v: envelope_error(v, "WHEATSTONE_BRIDGE", "INVALID_INPUT")
                       and envelope_field(v, "DETAIL") == "r3=-300")
+
+    # Regression: voltageDivider/currentDivider must reject negative driving
+    # signals. Bipolar supplies are modeled by the caller as absolute values
+    # with explicit sign handling; mixing negative Vin here used to silently
+    # return Vout=-Vin/2 (and likewise for current), masking bad inputs.
+    r.check("voltageDivider", "negative vin -> INVALID_INPUT",
+            c("voltageDivider", {"vin": "-12", "r1": "1000", "r2": "1000"}),
+            lambda v: envelope_error(v, "VOLTAGE_DIVIDER", "INVALID_INPUT")
+                      and "vin must not be negative" in (envelope_field(v, "REASON") or "")
+                      and envelope_field(v, "DETAIL") == "vin=-12")
+    r.check("voltageDivider", "zero vin still allowed",
+            c("voltageDivider", {"vin": "0", "r1": "1000", "r2": "1000"}),
+            lambda v: envelope_ok(v, "VOLTAGE_DIVIDER")
+                      and envelope_field(v, "VOUT") == "0")
+    r.check("currentDivider", "negative totalCurrent -> INVALID_INPUT",
+            c("currentDivider", {"totalCurrent": "-1", "r1": "1000", "r2": "1000"}),
+            lambda v: envelope_error(v, "CURRENT_DIVIDER", "INVALID_INPUT")
+                      and "totalCurrent must not be negative" in (envelope_field(v, "REASON") or "")
+                      and envelope_field(v, "DETAIL") == "totalCurrent=-1")
+    r.check("currentDivider", "zero totalCurrent still allowed",
+            c("currentDivider", {"totalCurrent": "0", "r1": "1000", "r2": "1000"}),
+            lambda v: envelope_ok(v, "CURRENT_DIVIDER"))
 
 
 def test_digital(r: TestRunner) -> None:
