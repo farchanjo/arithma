@@ -55,6 +55,11 @@ pub fn expression_error_envelope(tool: &str, err: &ExpressionError) -> String {
             "operation is undefined for this input",
             Some(format!("op={op}, value={value}")),
         ),
+        ExpressionError::Overflow { op } => (
+            ErrorCode::Overflow,
+            "arithmetic result exceeds the supported range",
+            Some(format!("op={op}")),
+        ),
     };
     match detail {
         Some(d) => error_with_detail(tool, code, reason, &d),

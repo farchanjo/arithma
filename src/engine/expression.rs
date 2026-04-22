@@ -69,6 +69,13 @@ pub enum ExpressionError {
         /// String representation of the offending input.
         value: String,
     },
+    /// Arithmetic result overflowed f64 range (produced ±Inf). The f64
+    /// backend returns this instead of leaking IEEE-754 infinities to callers.
+    #[error("Arithmetic overflow in {op}")]
+    Overflow {
+        /// Operator that produced the non-finite result (`+`, `-`, `*`, `/`, `^`).
+        op: String,
+    },
 }
 
 /// Evaluates a mathematical expression without variables.
@@ -109,6 +116,7 @@ pub fn evaluate_with_variables(
     }
     let mut parser = Parser::new(expression, variables);
     let result = parser.parse_expression()?;
+    parser.skip_whitespace();
     if let Some(ch) = parser.current_char() {
         return Err(ExpressionError::UnexpectedChar {
             pos: parser.pos,
@@ -123,8 +131,9 @@ pub fn evaluate_with_variables(
 // --------------------------------------------------------------------------- //
 
 struct Parser<'a> {
-    /// Whitespace-stripped input as a `Vec<char>` so indexing is O(1) regardless of
-    /// UTF-8 byte width — keeps position semantics identical to Java's `charAt`.
+    /// Raw input preserved verbatim — whitespace is skipped on demand at
+    /// token boundaries (see `skip_whitespace`). This avoids collapsing
+    /// adjacent numbers: `"1 2"` must be rejected, not read as `12`.
     input: Vec<char>,
     variables: &'a HashMap<String, f64>,
     pos: usize,
@@ -135,9 +144,8 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(input: &str, variables: &'a HashMap<String, f64>) -> Self {
-        let stripped: Vec<char> = input.chars().filter(|c| !c.is_whitespace()).collect();
         Self {
-            input: stripped,
+            input: input.chars().collect(),
             variables,
             pos: 0,
             paren_depth: 0,
@@ -148,18 +156,40 @@ impl<'a> Parser<'a> {
         self.input.get(self.pos).copied()
     }
 
+    /// Advance past any whitespace at the current position. Called at every
+    /// token boundary so that whitespace only separates tokens and never
+    /// fuses them.
+    fn skip_whitespace(&mut self) {
+        while let Some(ch) = self.current_char() {
+            if ch.is_whitespace() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn check_finite(value: f64, op: &str) -> Result<f64, ExpressionError> {
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(ExpressionError::Overflow { op: op.to_string() })
+        }
+    }
+
     // ---- expression = term (('+' | '-') term)* ---- //
     fn parse_expression(&mut self) -> Result<f64, ExpressionError> {
         let mut result = self.parse_term()?;
-        while let Some(ch) = self.current_char() {
-            match ch {
-                '+' => {
+        loop {
+            self.skip_whitespace();
+            match self.current_char() {
+                Some('+') => {
                     self.pos += 1;
-                    result += self.parse_term()?;
+                    result = Self::check_finite(result + self.parse_term()?, "+")?;
                 }
-                '-' => {
+                Some('-') => {
                     self.pos += 1;
-                    result -= self.parse_term()?;
+                    result = Self::check_finite(result - self.parse_term()?, "-")?;
                 }
                 _ => break,
             }
@@ -170,27 +200,28 @@ impl<'a> Parser<'a> {
     // ---- term = power (('*' | '/' | '%') power)* ---- //
     fn parse_term(&mut self) -> Result<f64, ExpressionError> {
         let mut result = self.parse_power()?;
-        while let Some(ch) = self.current_char() {
-            match ch {
-                '*' => {
+        loop {
+            self.skip_whitespace();
+            match self.current_char() {
+                Some('*') => {
                     self.pos += 1;
-                    result *= self.parse_power()?;
+                    result = Self::check_finite(result * self.parse_power()?, "*")?;
                 }
-                '/' => {
+                Some('/') => {
                     self.pos += 1;
                     let rhs = self.parse_power()?;
                     if rhs == 0.0 {
                         return Err(ExpressionError::DivisionByZero);
                     }
-                    result /= rhs;
+                    result = Self::check_finite(result / rhs, "/")?;
                 }
-                '%' => {
+                Some('%') => {
                     self.pos += 1;
                     let rhs = self.parse_power()?;
                     if rhs == 0.0 {
                         return Err(ExpressionError::DivisionByZero);
                     }
-                    result %= rhs;
+                    result = Self::check_finite(result % rhs, "%")?;
                 }
                 _ => break,
             }
@@ -201,10 +232,11 @@ impl<'a> Parser<'a> {
     // ---- power = unary ('^' power)?  (right-associative) ---- //
     fn parse_power(&mut self) -> Result<f64, ExpressionError> {
         let base = self.parse_unary()?;
+        self.skip_whitespace();
         if self.current_char() == Some('^') {
             self.pos += 1;
             let exponent = self.parse_power()?;
-            Ok(base.powf(exponent))
+            Self::check_finite(base.powf(exponent), "^")
         } else {
             Ok(base)
         }
@@ -212,6 +244,7 @@ impl<'a> Parser<'a> {
 
     // ---- unary = '-' unary | primary ---- //
     fn parse_unary(&mut self) -> Result<f64, ExpressionError> {
+        self.skip_whitespace();
         if self.current_char() == Some('-') {
             self.pos += 1;
             let value = self.parse_unary()?;
@@ -223,6 +256,7 @@ impl<'a> Parser<'a> {
 
     // ---- primary = NUMBER | VARIABLE | FUNCTION '(' expr ')' | '(' expr ')' ---- //
     fn parse_primary(&mut self) -> Result<f64, ExpressionError> {
+        self.skip_whitespace();
         let ch = self.current_char().ok_or(ExpressionError::UnexpectedEnd)?;
         if ch == '(' {
             self.pos += 1;
@@ -282,6 +316,7 @@ impl<'a> Parser<'a> {
             }
         }
         let name: String = self.input[start..self.pos].iter().collect();
+        self.skip_whitespace();
 
         if self.current_char() == Some('(') {
             self.pos += 1;
@@ -300,6 +335,7 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_close_paren(&mut self) -> Result<(), ExpressionError> {
+        self.skip_whitespace();
         if self.current_char() != Some(')') {
             return Err(ExpressionError::ExpectedCloseParen { pos: self.pos });
         }
@@ -720,9 +756,10 @@ mod tests {
 
     #[test]
     fn err_expected_close_paren() {
-        // Whitespace stripped: "(1+2" — position 4 is past the last char.
+        // Whitespace is preserved in positions now — the 6-char input
+        // bottoms out past the last byte at position 6.
         let err = evaluate("(1 + 2").unwrap_err();
-        assert_eq!(err.to_string(), "Expected ')' at position 4");
+        assert_eq!(err.to_string(), "Expected ')' at position 6");
     }
 
     #[test]
@@ -741,5 +778,83 @@ mod tests {
             matches!(err, ExpressionError::ExpectedCloseParen { .. }),
             "got {err:?}"
         );
+    }
+
+    // ---- Overflow guard: IEEE ±Inf must not leak ----
+
+    #[test]
+    fn multiplication_overflow_is_error() {
+        match evaluate("1e308 * 1e308").unwrap_err() {
+            ExpressionError::Overflow { op } => assert_eq!(op, "*"),
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn addition_overflow_is_error() {
+        match evaluate("1e308 + 1e308").unwrap_err() {
+            ExpressionError::Overflow { op } => assert_eq!(op, "+"),
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_overflow_is_error() {
+        match evaluate("-1e308 * 1e308").unwrap_err() {
+            ExpressionError::Overflow { op } => assert_eq!(op, "*"),
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn power_overflow_is_error() {
+        // 10^400 vastly exceeds f64::MAX — powf returns +Inf.
+        match evaluate("10 ^ 400").unwrap_err() {
+            ExpressionError::Overflow { op } => assert_eq!(op, "^"),
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    // ---- Whitespace no longer fuses adjacent numbers ----
+
+    #[test]
+    fn adjacent_numbers_reject() {
+        // Previously: `"1 2 3"` collapsed to `123`. Now it must fail at
+        // position 2, where the second operand appears without an operator.
+        let err = evaluate("1 2 3").unwrap_err();
+        match err {
+            ExpressionError::UnexpectedChar { pos, ch } => {
+                assert_eq!(pos, 2);
+                assert_eq!(ch, '2');
+            }
+            other => panic!("expected UnexpectedChar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adjacent_numbers_partial_expression() {
+        // `"1 + 2 3"` used to parse as `1 + 23 = 24`; now the trailing `3`
+        // is surfaced as an unexpected char.
+        let err = evaluate("1 + 2 3").unwrap_err();
+        match err {
+            ExpressionError::UnexpectedChar { pos, ch } => {
+                assert_eq!(pos, 6);
+                assert_eq!(ch, '3');
+            }
+            other => panic!("expected UnexpectedChar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whitespace_inside_number_rejected() {
+        // `"10 20"` must not fuse into `1020`.
+        let err = evaluate("10 20").unwrap_err();
+        match err {
+            ExpressionError::UnexpectedChar { pos, ch } => {
+                assert_eq!(pos, 3);
+                assert_eq!(ch, '2');
+            }
+            other => panic!("expected UnexpectedChar, got {other:?}"),
+        }
     }
 }
