@@ -54,26 +54,40 @@ fn parse_field(tool: &str, label: &str, raw: &str) -> Result<BigDecimal, String>
     })
 }
 
-fn require_positive(tool: &str, value: &BigDecimal, label: &str) -> Result<(), String> {
+/// Reject non-positive values. `subject` is the lowercase noun phrase that
+/// fits into "<subject> must be greater than zero" (e.g. "principal", "years").
+/// `detail_key` is the MCP parameter name echoed in the DETAIL line so the
+/// caller can match it against its own arguments without string mangling.
+fn require_positive(
+    tool: &str,
+    value: &BigDecimal,
+    subject: &str,
+    detail_key: &str,
+) -> Result<(), String> {
     if value <= &BigDecimal::zero() {
         Err(error_with_detail(
             tool,
             ErrorCode::InvalidInput,
-            &format!("{label} must be greater than zero"),
-            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+            &format!("{subject} must be greater than zero"),
+            &format!("{detail_key}={}", strip_plain(value)),
         ))
     } else {
         Ok(())
     }
 }
 
-fn require_non_negative(tool: &str, value: &BigDecimal, label: &str) -> Result<(), String> {
+fn require_non_negative(
+    tool: &str,
+    value: &BigDecimal,
+    subject: &str,
+    detail_key: &str,
+) -> Result<(), String> {
     if value < &BigDecimal::zero() {
         Err(error_with_detail(
             tool,
             ErrorCode::InvalidInput,
-            &format!("{label} must not be negative"),
-            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+            &format!("{subject} must not be negative"),
+            &format!("{detail_key}={}", strip_plain(value)),
         ))
     } else {
         Ok(())
@@ -112,23 +126,29 @@ fn div_scale(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
 }
 
 /// Convert a `BigDecimal` that represents an exact integer into `i64`.
-fn int_value_exact(tool: &str, value: &BigDecimal, label: &str) -> Result<i64, String> {
+/// `subject` / `detail_key` split mirrors [`require_positive`].
+fn int_value_exact(
+    tool: &str,
+    value: &BigDecimal,
+    subject: &str,
+    detail_key: &str,
+) -> Result<i64, String> {
     let normalized = value.normalized();
     let fractional = &normalized - normalized.with_scale(0);
     if !fractional.is_zero() {
         return Err(error_with_detail(
             tool,
             ErrorCode::InvalidInput,
-            &format!("{label} must be an integer"),
-            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+            &format!("{subject} must be an integer"),
+            &format!("{detail_key}={}", strip_plain(value)),
         ));
     }
     normalized.to_i64().ok_or_else(|| {
         error_with_detail(
             tool,
             ErrorCode::OutOfRange,
-            &format!("{label} is out of i64 range"),
-            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+            &format!("{subject} is out of i64 range"),
+            &format!("{detail_key}={}", strip_plain(value)),
         )
     })
 }
@@ -158,21 +178,21 @@ pub fn compound_interest(
         Err(e) => return e,
     };
 
-    if let Err(e) = require_positive(tool, &principal_amt, "Principal") {
+    if let Err(e) = require_positive(tool, &principal_amt, "principal", "principal") {
         return e;
     }
-    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+    if let Err(e) = require_non_negative(tool, &rate, "annual rate", "annualRate") {
         return e;
     }
-    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+    if let Err(e) = require_positive(tool, &years_dec, "years", "years") {
         return e;
     }
     if compounds_per_year <= 0 {
         return error_with_detail(
             tool,
             ErrorCode::InvalidInput,
-            "Compounds per year must be greater than zero",
-            &format!("compounds_per_year={compounds_per_year}"),
+            "compounds per year must be greater than zero",
+            &format!("compoundsPerYear={compounds_per_year}"),
         );
     }
 
@@ -181,7 +201,7 @@ pub fn compound_interest(
     let rate_over_comp = div_scale(&annual_rate_dec, &compounds_count);
     let one_plus_rate = add_ctx(&one(), &rate_over_comp);
     let total_compounds_dec = mul_ctx(&compounds_count, &years_dec);
-    let total_compounds = match int_value_exact(tool, &total_compounds_dec, "Compounds * years") {
+    let total_compounds = match int_value_exact(tool, &total_compounds_dec, "total compounding periods", "totalPeriods") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -206,18 +226,18 @@ pub fn loan_payment(principal: &str, annual_rate: &str, years: &str) -> String {
         Err(e) => return e,
     };
 
-    if let Err(e) = require_positive(tool, &principal_amt, "Principal") {
+    if let Err(e) = require_positive(tool, &principal_amt, "principal", "principal") {
         return e;
     }
-    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+    if let Err(e) = require_non_negative(tool, &rate, "annual rate", "annualRate") {
         return e;
     }
-    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+    if let Err(e) = require_positive(tool, &years_dec, "years", "years") {
         return e;
     }
 
     let months = mul_ctx(&years_dec, &BigDecimal::from(MONTHS_PER_YEAR));
-    let total_months = match int_value_exact(tool, &months, "Total months") {
+    let total_months = match int_value_exact(tool, &months, "total months", "totalMonths") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -255,19 +275,19 @@ pub fn present_value(future_value: &str, annual_rate: &str, years: &str) -> Stri
         Err(e) => return e,
     };
 
-    if let Err(e) = require_positive(tool, &future_val, "Future value") {
+    if let Err(e) = require_positive(tool, &future_val, "future value", "futureValue") {
         return e;
     }
-    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+    if let Err(e) = require_non_negative(tool, &rate, "annual rate", "annualRate") {
         return e;
     }
-    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+    if let Err(e) = require_positive(tool, &years_dec, "years", "years") {
         return e;
     }
 
     let annual_rate_dec = div_scale(&rate, &hundred());
     let one_plus_r = add_ctx(&one(), &annual_rate_dec);
-    let exponent = match int_value_exact(tool, &years_dec, "Years") {
+    let exponent = match int_value_exact(tool, &years_dec, "years", "years") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -293,13 +313,13 @@ pub fn future_value_annuity(payment: &str, annual_rate: &str, years: &str) -> St
         Err(e) => return e,
     };
 
-    if let Err(e) = require_positive(tool, &pmt, "Payment") {
+    if let Err(e) = require_positive(tool, &pmt, "payment", "payment") {
         return e;
     }
-    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+    if let Err(e) = require_non_negative(tool, &rate, "annual rate", "annualRate") {
         return e;
     }
-    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+    if let Err(e) = require_positive(tool, &years_dec, "years", "years") {
         return e;
     }
 
@@ -307,7 +327,7 @@ pub fn future_value_annuity(payment: &str, annual_rate: &str, years: &str) -> St
         mul_ctx(&pmt, &years_dec)
     } else {
         let annual_rate_dec = div_scale(&rate, &hundred());
-        let exponent = match int_value_exact(tool, &years_dec, "Years") {
+        let exponent = match int_value_exact(tool, &years_dec, "years", "years") {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -357,18 +377,18 @@ pub fn amortization_schedule(principal: &str, annual_rate: &str, years: &str) ->
         Err(e) => return e,
     };
 
-    if let Err(e) = require_positive(tool, &principal_amt, "Principal") {
+    if let Err(e) = require_positive(tool, &principal_amt, "principal", "principal") {
         return e;
     }
-    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+    if let Err(e) = require_non_negative(tool, &rate, "annual rate", "annualRate") {
         return e;
     }
-    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+    if let Err(e) = require_positive(tool, &years_dec, "years", "years") {
         return e;
     }
 
     let months = mul_ctx(&years_dec, &BigDecimal::from(MONTHS_PER_YEAR));
-    let total_months = match int_value_exact(tool, &months, "Total months") {
+    let total_months = match int_value_exact(tool, &months, "total months", "totalMonths") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -488,7 +508,7 @@ mod tests {
     fn compound_interest_negative_principal() {
         assert_eq!(
             compound_interest("-100", "5", "1", 1),
-            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] Principal must be greater than zero\nDETAIL: principal=-100"
+            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] principal must be greater than zero\nDETAIL: principal=-100"
         );
     }
 
@@ -496,7 +516,15 @@ mod tests {
     fn compound_interest_zero_compounds() {
         assert_eq!(
             compound_interest("1000", "5", "1", 0),
-            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] Compounds per year must be greater than zero\nDETAIL: compounds_per_year=0"
+            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] compounds per year must be greater than zero\nDETAIL: compoundsPerYear=0"
+        );
+    }
+
+    #[test]
+    fn compound_interest_negative_rate() {
+        assert_eq!(
+            compound_interest("1000", "-5", "1", 1),
+            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] annual rate must not be negative\nDETAIL: annualRate=-5"
         );
     }
 
@@ -530,7 +558,7 @@ mod tests {
     fn loan_payment_zero_principal() {
         assert_eq!(
             loan_payment("0", "5", "10"),
-            "LOAN_PAYMENT: ERROR\nREASON: [INVALID_INPUT] Principal must be greater than zero\nDETAIL: principal=0"
+            "LOAN_PAYMENT: ERROR\nREASON: [INVALID_INPUT] principal must be greater than zero\nDETAIL: principal=0"
         );
     }
 

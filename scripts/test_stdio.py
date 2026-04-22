@@ -351,7 +351,7 @@ def test_vector(r: TestRunner) -> None:
 
 
 def test_financial(r: TestRunner) -> None:
-    r.category("financial", 6)
+    r.category("financial", 9)
     c = r.client.call
     r.check("compoundInterest", "1000@5%/10y/12", c("compoundInterest", {
         "principal": "1000", "annualRate": "5", "years": "10", "compoundsPerYear": 12
@@ -378,6 +378,26 @@ def test_financial(r: TestRunner) -> None:
             and envelope_field(v, "ROW_1") is not None,
             detail_render=lambda v: f"header_ok={envelope_ok(v, 'AMORTIZATION_SCHEDULE')}, "
                                     f"row_1={envelope_field(v, 'ROW_1')!s:.60}")
+
+    # Regression: financial error envelopes must now use lowercase reason text
+    # and camelCase DETAIL keys (previously "Principal" / "annual rate=-5").
+    r.check("compoundInterest", "negative principal -> lowercase + detail",
+            c("compoundInterest", {"principal": "-100", "annualRate": "5",
+                                   "years": "1", "compoundsPerYear": 1}),
+            lambda v: envelope_error(v, "COMPOUND_INTEREST", "INVALID_INPUT")
+                      and "principal must be greater than zero"
+                          in (envelope_field(v, "REASON") or "")
+                      and envelope_field(v, "DETAIL") == "principal=-100")
+    r.check("compoundInterest", "negative rate -> annualRate in DETAIL",
+            c("compoundInterest", {"principal": "1000", "annualRate": "-5",
+                                   "years": "1", "compoundsPerYear": 12}),
+            lambda v: envelope_error(v, "COMPOUND_INTEREST", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "annualRate=-5")
+    r.check("compoundInterest", "zero compounds -> compoundsPerYear in DETAIL",
+            c("compoundInterest", {"principal": "1000", "annualRate": "5",
+                                   "years": "1", "compoundsPerYear": 0}),
+            lambda v: envelope_error(v, "COMPOUND_INTEREST", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "compoundsPerYear=0")
 
 
 def test_calculus(r: TestRunner) -> None:
@@ -552,7 +572,7 @@ def test_graphing(r: TestRunner) -> None:
 
 
 def test_network(r: TestRunner) -> None:
-    r.category("network", 13)
+    r.category("network", 16)
     c = r.client.call
 
     subnet = c("subnetCalculator", {"address": "192.168.1.0", "cidr": 24})
@@ -594,6 +614,21 @@ def test_network(r: TestRunner) -> None:
             and envelope_field(v, "ROW_1") is not None,
             detail_render=lambda v: f"row_1={envelope_field(v, 'ROW_1')!s:.60}")
 
+    # Regression: VLSM must reject invalid host-count arrays (empty, zero,
+    # negative) instead of silently producing nonsensical allocations.
+    r.check("vlsmSubnets", "empty hostCounts -> INVALID_INPUT",
+            c("vlsmSubnets", {"networkCidr": "192.168.1.0/24", "hostCounts": "[]"}),
+            lambda v: envelope_error(v, "VLSM_SUBNETS", "INVALID_INPUT")
+                      and "must not be empty" in (envelope_field(v, "REASON") or ""))
+    r.check("vlsmSubnets", "zero hostCount -> INVALID_INPUT",
+            c("vlsmSubnets", {"networkCidr": "192.168.1.0/24", "hostCounts": "[0]"}),
+            lambda v: envelope_error(v, "VLSM_SUBNETS", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "hosts=0")
+    r.check("vlsmSubnets", "negative hostCount -> INVALID_INPUT",
+            c("vlsmSubnets", {"networkCidr": "192.168.1.0/24", "hostCounts": "[-10]"}),
+            lambda v: envelope_error(v, "VLSM_SUBNETS", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "hosts=-10")
+
     summary = c("summarizeSubnets", {
         "subnets": '["192.168.0.0/25","192.168.0.128/25"]'
     })
@@ -634,8 +669,20 @@ def test_network(r: TestRunner) -> None:
 
 
 def test_analog(r: TestRunner) -> None:
-    r.category("analog electronics", 14)
+    r.category("analog electronics", 16)
     c = r.client.call
+
+    # Regression: physical positivity invariants on R/C must be enforced
+    # instead of quietly returning a negative time constant.
+    r.check("rcTimeConstant", "negative R -> INVALID_INPUT",
+            c("rcTimeConstant", {"resistance": "-1000", "capacitance": "0.000001"}),
+            lambda v: envelope_error(v, "RC_TIME_CONSTANT", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "resistance=-1000")
+    r.check("filterCutoff", "negative reactive -> INVALID_INPUT",
+            c("filterCutoff", {"resistance": "1000", "reactive": "-0.000001",
+                               "filterType": "lowpass"}),
+            lambda v: envelope_error(v, "FILTER_CUTOFF", "INVALID_INPUT")
+                      and envelope_field(v, "DETAIL") == "capacitance=-0.000001")
 
     ohms = c("ohmsLaw", {"voltage": "12", "current": "2", "resistance": "", "power": ""})
     r.check("ohmsLaw", "V=12 I=2", ohms,

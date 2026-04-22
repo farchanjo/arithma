@@ -197,12 +197,21 @@ fn non_zero(tool: &str, value: &BigDecimal, name: &str) -> Result<(), String> {
     }
 }
 
+/// Reject non-positive values. `name` is used both as the lowercase subject
+/// in the reason text ("<name> must be positive") and as the DETAIL key. It
+/// must not contain whitespace — pick a single-token identifier that matches
+/// the MCP parameter name (e.g. `resistance`, `capacitance`).
 fn positive(tool: &str, value: &BigDecimal, name: &str) -> Result<(), String> {
+    debug_assert!(
+        !name.contains(char::is_whitespace),
+        "positive() name must be a single token",
+    );
     if value.is_zero() || value.is_negative() {
-        Err(error(
+        Err(error_with_detail(
             tool,
             ErrorCode::InvalidInput,
             &format!("{name} must be positive"),
+            &format!("{name}={}", strip_plain(value)),
         ))
     } else {
         Ok(())
@@ -550,14 +559,13 @@ pub fn rc_time_constant(resistance: &str, capacitance: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let tau = mul_ctx(&r, &c);
-    if tau.is_zero() {
-        return error(
-            RC_TIME_CONSTANT,
-            ErrorCode::DivisionByZero,
-            "R*C must not be zero",
-        );
+    if let Err(e) = positive(RC_TIME_CONSTANT, &r, "resistance") {
+        return e;
     }
+    if let Err(e) = positive(RC_TIME_CONSTANT, &c, "capacitance") {
+        return e;
+    }
+    let tau = mul_ctx(&r, &c);
     let denom = mul_ctx(&TWO_PI, &tau);
     let freq = div_scaled(&BigDecimal::from(1), &denom);
     Response::ok(RC_TIME_CONSTANT)
@@ -576,22 +584,14 @@ pub fn rl_time_constant(resistance: &str, inductance: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if r.is_zero() {
-        return error(
-            RL_TIME_CONSTANT,
-            ErrorCode::DivisionByZero,
-            "resistance must not be zero",
-        );
+    if let Err(e) = positive(RL_TIME_CONSTANT, &r, "resistance") {
+        return e;
+    }
+    if let Err(e) = positive(RL_TIME_CONSTANT, &l, "inductance") {
+        return e;
     }
     let tau = div_scaled(&l, &r);
     let denom = mul_ctx(&TWO_PI, &l);
-    if denom.is_zero() {
-        return error(
-            RL_TIME_CONSTANT,
-            ErrorCode::DivisionByZero,
-            "inductance must not be zero",
-        );
-    }
     let freq = div_scaled(&r, &denom);
     Response::ok(RL_TIME_CONSTANT)
         .field("TAU", strip_plain(&tau))
@@ -719,11 +719,11 @@ fn compute_decibel(val: &BigDecimal, mode: &str) -> Result<BigDecimal, String> {
     let twenty = BigDecimal::from(20);
     match mode {
         "powerToDb" => {
-            positive(DECIBEL_CONVERT, val, "power value")?;
+            positive(DECIBEL_CONVERT, val, "value")?;
             Ok(mul_ctx(&ten, &af_log10(val)))
         }
         "voltageToDb" => {
-            positive(DECIBEL_CONVERT, val, "voltage value")?;
+            positive(DECIBEL_CONVERT, val, "value")?;
             Ok(mul_ctx(&twenty, &af_log10(val)))
         }
         "dbToPower" => {
@@ -755,14 +755,13 @@ pub fn filter_cutoff(resistance: &str, reactive: &str, filter_type: &str) -> Str
         Ok(v) => v,
         Err(e) => return e,
     };
-    let rc = mul_ctx(&r, &c);
-    if rc.is_zero() {
-        return error(
-            FILTER_CUTOFF,
-            ErrorCode::DivisionByZero,
-            "R*C must not be zero",
-        );
+    if let Err(e) = positive(FILTER_CUTOFF, &r, "resistance") {
+        return e;
     }
+    if let Err(e) = positive(FILTER_CUTOFF, &c, "capacitance") {
+        return e;
+    }
+    let rc = mul_ctx(&r, &c);
     let denom = mul_ctx(&TWO_PI, &rc);
     let freq = div_scaled(&BigDecimal::from(1), &denom);
     let ftype = match validate_filter_type(FILTER_CUTOFF, filter_type) {
@@ -1038,7 +1037,40 @@ mod tests {
     fn decibel_negative_power_error() {
         assert_eq!(
             decibel_convert("-1", "powerToDb"),
-            "DECIBEL_CONVERT: ERROR\nREASON: [INVALID_INPUT] power value must be positive"
+            "DECIBEL_CONVERT: ERROR\nREASON: [INVALID_INPUT] value must be positive\nDETAIL: value=-1"
+        );
+    }
+
+    #[test]
+    fn rc_time_constant_rejects_negative_resistance() {
+        // Regression: previously produced TAU: -0.001 silently.
+        assert_eq!(
+            rc_time_constant("-1000", "0.000001"),
+            "RC_TIME_CONSTANT: ERROR\nREASON: [INVALID_INPUT] resistance must be positive\nDETAIL: resistance=-1000"
+        );
+    }
+
+    #[test]
+    fn rc_time_constant_rejects_negative_capacitance() {
+        assert_eq!(
+            rc_time_constant("1000", "-0.000001"),
+            "RC_TIME_CONSTANT: ERROR\nREASON: [INVALID_INPUT] capacitance must be positive\nDETAIL: capacitance=-0.000001"
+        );
+    }
+
+    #[test]
+    fn rl_time_constant_rejects_negative_resistance() {
+        assert_eq!(
+            rl_time_constant("-10", "0.001"),
+            "RL_TIME_CONSTANT: ERROR\nREASON: [INVALID_INPUT] resistance must be positive\nDETAIL: resistance=-10"
+        );
+    }
+
+    #[test]
+    fn filter_cutoff_rejects_negative_reactive() {
+        assert_eq!(
+            filter_cutoff("1000", "-0.000001", "lowpass"),
+            "FILTER_CUTOFF: ERROR\nREASON: [INVALID_INPUT] capacitance must be positive\nDETAIL: capacitance=-0.000001"
         );
     }
 

@@ -732,6 +732,23 @@ fn compute_vlsm(network_cidr: &str, host_counts_json: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if counts.is_empty() {
+        return error(
+            VLSM_SUBNETS,
+            ErrorCode::InvalidInput,
+            "host counts array must not be empty",
+        );
+    }
+    // Reject zero and negative host counts — the allocator used to silently
+    // accept them and produce /31 allocations with nonsensical usable=-1.
+    if let Some(&bad) = counts.iter().find(|&&n| n < 1) {
+        return error_with_detail(
+            VLSM_SUBNETS,
+            ErrorCode::InvalidInput,
+            "each host count must be a positive integer",
+            &format!("hosts={bad}"),
+        );
+    }
     counts.sort_by(|a, b| b.cmp(a));
 
     let mut pointer = base_network;
@@ -1239,6 +1256,32 @@ mod tests {
         assert_eq!(
             vlsm_subnets("192.168.1.0/28", "[100]"),
             "VLSM_SUBNETS: ERROR\nREASON: [INVALID_INPUT] cannot fit 100 hosts in /28\nDETAIL: hosts=100"
+        );
+    }
+
+    #[test]
+    fn vlsm_rejects_empty_host_counts() {
+        assert_eq!(
+            vlsm_subnets("192.168.1.0/24", "[]"),
+            "VLSM_SUBNETS: ERROR\nREASON: [INVALID_INPUT] host counts array must not be empty"
+        );
+    }
+
+    #[test]
+    fn vlsm_rejects_zero_host_count() {
+        // Regression: previously allocated a /31 for 0 hosts silently.
+        assert_eq!(
+            vlsm_subnets("192.168.1.0/24", "[0]"),
+            "VLSM_SUBNETS: ERROR\nREASON: [INVALID_INPUT] each host count must be a positive integer\nDETAIL: hosts=0"
+        );
+    }
+
+    #[test]
+    fn vlsm_rejects_negative_host_count() {
+        // Regression: previously produced `cidr=32 | usable=-1` silently.
+        assert_eq!(
+            vlsm_subnets("192.168.1.0/24", "[-10]"),
+            "VLSM_SUBNETS: ERROR\nREASON: [INVALID_INPUT] each host count must be a positive integer\nDETAIL: hosts=-10"
         );
     }
 
