@@ -1,8 +1,6 @@
-//! Unit conversion registry — 1:1 port of Java
-//! `com.archanjo.mathcalculator.engine.UnitRegistry` +
-//! `UnitCategory` + `UnitDefinition`.
+//! Unit conversion registry — 21 categories with 118 unit definitions.
 //!
-//! Arithmetic matches Java `MathContext.DECIMAL128` (34 significant digits)
+//! Arithmetic uses DECIMAL128 semantics (34 significant digits)
 //! combined with `RoundingMode.HALF_UP`:
 //!
 //! * multiplications use [`Context`] with precision 34 + `HALF_UP`,
@@ -28,7 +26,7 @@ use crate::engine::bigdecimal_ext::{DECIMAL128_PRECISION, strip_plain};
 
 /// Errors surfaced by the unit registry.
 ///
-/// Messages match the Java `IllegalArgumentException` strings verbatim so
+/// Messages follow standard error conventions.
 /// downstream MCP clients observe identical text.
 #[derive(Debug, thiserror::Error)]
 pub enum UnitError {
@@ -60,13 +58,10 @@ pub enum UnitError {
 }
 
 // ------------------------------------------------------------------ //
-//  UnitCategory — mirrors the Java enum in declaration order
+//  UnitCategory — 21 measurement categories
 // ------------------------------------------------------------------ //
 
 /// Categories of measurable physical quantities supported by the converter.
-///
-/// Variants are declared in the same order as the Java enum so
-/// [`UnitCategory::all`] produces identical ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnitCategory {
     DataStorage,

@@ -1,7 +1,7 @@
-//! Tool implementations — each module mirrors one `*Tool` class from the Java project.
+//! Tool implementations — 87 expert calculators across 15 categories.
 //!
-//! All tools return `String` (matching Java behavior) so errors can be embedded
-//! as `"Error: ..."` messages without exceptions crossing the MCP boundary.
+//! All tools return `String` so errors can be embedded as `"Error: ..."`
+//! messages without protocol-level exceptions crossing the MCP boundary.
 
 pub mod analog_electronics;
 pub mod basic;

@@ -59,7 +59,7 @@ graph LR
 - [Tool matrix (85 tools)](#tool-matrix-85-tools)
 - [Examples](#examples)
 - [Architecture](#architecture)
-- [Precision & numerical parity with Java](#precision--numerical-parity-with-java)
+- [Precision Guarantees](#precision-guarantees)
 - [Development](#development)
 - [License](#license)
 
