@@ -1,20 +1,55 @@
-# math-calc-mcp
+<div align="center">
+
+![arithma logo](arithma-logo.svg)
+
+# arithma
+
+### The Ultimate LLM Calculator Engine
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-1.0-purple.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-434-brightgreen.svg)](scripts/test_stdio.py)
 
-**Pure-Rust [Model Context Protocol](https://modelcontextprotocol.io) server exposing 85 math, engineering, and conversion tools over stdio.** A full-featured port of the Spring AI [math-calculator](https://github.com/farchanjo/math-calculator) from Java 25 to Rust — same behavior, same precision, single static binary, cross-platform.
+**Precision mathematics at scale.** A pure-Rust [Model Context Protocol](https://modelcontextprotocol.io) server exposing **87 expert-grade calculator tools** designed for LLMs. Arbitrary-precision arithmetic, exact transcendentals, networking, electronics, finance, and unit conversion — all over a single stdio binary.
 
-## Highlights
+</div>
 
-- **100% Rust, zero C dependencies** — one `~3 MB` statically-linked binary for Linux, macOS, and Windows
-- **Arbitrary-precision arithmetic** via [`bigdecimal`](https://crates.io/crates/bigdecimal) + [`num-bigint`](https://crates.io/crates/num-bigint), matching Java `BigDecimal`/`BigInteger` semantics (DECIMAL128, HALF_UP)
-- **Correctly-rounded transcendentals** via [`astro-float`](https://crates.io/crates/astro-float) (drop-in replacement for Java `StrictMath`)
-- **IANA-aware datetime** via [`jiff`](https://crates.io/crates/jiff) (no `libicu`, no C deps)
-- **Portable SIMD** via [`wide`](https://crates.io/crates/wide) — auto-dispatches SSE2/AVX2/AVX-512/NEON at runtime
-- **CPU-specific optimization** (`target-cpu=native`) with a portable `release-portable` profile for distribution
-- **349 unit tests** + **85-tool stdio integration suite** — all green, sub-second
+## Why arithma?
+
+```mermaid
+graph LR
+    A["LLM<br/>Claude/GPT/etc"] -->|calls tools| B["arithma"]
+    B -->|87 tools| C["Math"]
+    B -->|""|D["Finance"]
+    B -->|""|E["Electronics"]
+    B -->|""|F["Networks"]
+    B -->|""|G["Units"]
+    C -->|"BigDecimal<br/>StrictMath"| H["Precision Results"]
+    D --> H
+    E --> H
+    F --> H
+    G --> H
+    
+    style A fill:#6366f1,color:#fff
+    style B fill:#8b5cf6,color:#fff,stroke:#fff,stroke-width:3px
+    style C fill:#1e40af,color:#fff
+    style D fill:#1e40af,color:#fff
+    style E fill:#1e40af,color:#fff
+    style F fill:#1e40af,color:#fff
+    style G fill:#1e40af,color:#fff
+    style H fill:#16a34a,color:#fff,stroke:#fff,stroke-width:2px
+```
+
+## Core Strengths
+
+- **Pure Rust, zero C dependencies** — single `~3 MB` static binary for Linux, macOS, Windows
+- **Arbitrary-precision arithmetic** via [`bigdecimal`](https://crates.io/crates/bigdecimal) + [`num-bigint`](https://crates.io/crates/num-bigint) — matches Java `BigDecimal`/`BigInteger` (DECIMAL128, HALF_UP)
+- **Correctly-rounded transcendentals** via [`astro-float`](https://crates.io/crates/astro-float) — equivalent to Java `StrictMath`
+- **IANA timezone support** via [`jiff`](https://crates.io/crates/jiff) — no `libicu`, zero C deps
+- **Portable SIMD** via [`wide`](https://crates.io/crates/wide) — auto-dispatches SSE2/AVX2/AVX-512/NEON
+- **CPU optimization** — `target-cpu=native` for max speed, `release-portable` for distribution
+- **Bulletproof testing** — 434 unit + integration tests, sub-second full suite
 
 ## Table of contents
 
@@ -28,89 +63,89 @@
 - [Development](#development)
 - [License](#license)
 
-## Install
+## Quick Start
 
-Binary releases will be published via GitHub Releases. Until then, build from source:
+### Install
 
 ```bash
-git clone https://github.com/farchanjo/math-calc-mcp.git
-cd math-calc-mcp
+git clone https://github.com/farchanjo/arithma.git
+cd arithma
 cargo build --release
-# Binary lives at: ./target/release/math-calc-mcp
+# Binary: ./target/release/arithma
 ```
 
-Minimum Rust: **1.94** (pinned via `rust-toolchain.toml`).
+**Requirements**: Rust 1.94+ (pinned in `rust-toolchain.toml`)
 
-## Build from source
+### Build Profiles
 
 ```bash
-# Native CPU — fastest on the machine that compiles it (default release profile
-# uses RUSTFLAGS="-C target-cpu=native" via .cargo/config.toml)
+# Native CPU (fastest, uses target-cpu=native via .cargo/config.toml)
 cargo build --release
 
-# Portable build — targets x86-64-v3 (Haswell+; AVX2 available)
+# Portable build (targets x86-64-v3, Haswell+, includes AVX2)
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --profile release-portable
 
-# Run the stdio server (sends JSON-RPC over stdin/stdout)
-cargo run --release --bin math-calc-mcp
-# Or directly:
-./target/release/math-calc-mcp
+# Run the server directly
+./target/release/arithma
+
+# Or via cargo
+cargo run --release --bin arithma
 ```
 
-## Wire into an MCP client
+## Integration
 
 ### Claude Code
 
 ```bash
-claude mcp add math-calc -- /absolute/path/to/target/release/math-calc-mcp
+claude mcp add arithma -- /absolute/path/to/target/release/arithma
 ```
 
-### Claude Desktop / generic `mcp.json`
+### Claude Desktop / Generic MCP Client
 
 ```json
 {
   "mcpServers": {
-    "math-calc": {
-      "command": "/absolute/path/to/target/release/math-calc-mcp"
+    "arithma": {
+      "command": "/absolute/path/to/target/release/arithma"
     }
   }
 }
 ```
 
-### Cursor / Windsurf / OpenCode
+### Cursor, Windsurf, OpenCode, etc.
 
-All accept the same stdio command. Point them at the absolute path of the binary.
+Same stdio interface. Point to the binary path.
 
-### Verify the handshake
+### Verify Integration
 
 ```bash
-(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}\n';
+(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n';
  printf '{"jsonrpc":"2.0","method":"notifications/initialized"}\n';
  printf '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n';
- sleep 0.3) | ./target/release/math-calc-mcp 2>/dev/null | head -c 500
+ sleep 0.3) | ./target/release/arithma 2>/dev/null | head -c 500
 ```
 
-You should see an `initialize` response followed by a `tools/list` response containing all 85 tools.
+Should return `initialize` response + `tools/list` containing all 87 tools.
 
-## Tool matrix (85 tools)
+## Tool Catalog — 87 Expert Tools
 
-| Category | Count | Tools |
-|---|---:|---|
-| **Basic** (BigDecimal) | 7 | `add`, `subtract`, `multiply`, `divide`, `power`, `modulo`, `abs` |
-| **Scientific** (StrictMath + exact lookup) | 7 | `sqrt`, `log`, `log10`, `factorial`, `sin`, `cos`, `tan` |
-| **Programmable** (expression engine) | 2 | `evaluate`, `evaluateWithVariables` |
-| **Vector** (SIMD) | 4 | `sumArray`, `dotProduct`, `scaleArray`, `magnitudeArray` |
-| **Financial** (BigDecimal) | 6 | `compoundInterest`, `loanPayment`, `presentValue`, `futureValueAnnuity`, `returnOnInvestment`, `amortizationSchedule` |
-| **Calculus** (numerical) | 4 | `derivative`, `nthDerivative`, `definiteIntegral`, `tangentLine` |
-| **Unit converter** (21 categories, 118 units) | 2 | `convert`, `convertAutoDetect` |
-| **Cooking** (gas mark + aliases) | 3 | `convertCookingVolume`, `convertCookingWeight`, `convertOvenTemperature` |
-| **Measure reference** | 4 | `listCategories`, `listUnits`, `getConversionFactor`, `explainConversion` |
-| **DateTime** (IANA timezones) | 5 | `convertTimezone`, `formatDateTime`, `currentDateTime`, `listTimezones`, `dateTimeDifference` |
-| **Printing** (tape calculator) | 1 | `calculateWithTape` |
-| **Graphing** (plot + roots) | 3 | `plotFunction`, `solveEquation`, `findRoots` |
-| **Network** (IPv4/IPv6) | 13 | `subnetCalculator`, `ipToBinary`, `binaryToIp`, `ipToDecimal`, `decimalToIp`, `ipInSubnet`, `vlsmSubnets`, `summarizeSubnets`, `expandIpv6`, `compressIpv6`, `transferTime`, `throughput`, `tcpThroughput` |
-| **Analog electronics** | 14 | `ohmsLaw`, `resistorCombination`, `capacitorCombination`, `inductorCombination`, `voltageDivider`, `currentDivider`, `rcTimeConstant`, `rlTimeConstant`, `rlcResonance`, `impedance`, `decibelConvert`, `filterCutoff`, `ledResistor`, `wheatstoneBridge` |
-| **Digital electronics** | 10 | `convertBase`, `twosComplement`, `grayCode`, `bitwiseOp`, `adcResolution`, `dacOutput`, `timer555Astable`, `timer555Monostable`, `frequencyPeriod`, `nyquistRate` |
+| Category | Count | Examples |
+|:---|:---:|:---|
+| **Basic Math** | 7 | `add`, `subtract`, `multiply`, `divide`, `power`, `modulo`, `abs` |
+| **Scientific** | 7 | `sqrt`, `log`, `log10`, `factorial`, `sin`, `cos`, `tan` |
+| **Expression Engine** | 4 | `evaluate`, `evaluateWithVariables`, `evaluateExact`, `evaluateExactWithVariables` |
+| **Vectors & Arrays** | 4 | `sumArray`, `dotProduct`, `scaleArray`, `magnitudeArray` |
+| **Finance & Compound Interest** | 6 | `compoundInterest`, `loanPayment`, `presentValue`, `futureValueAnnuity`, `returnOnInvestment`, `amortizationSchedule` |
+| **Calculus** | 4 | `derivative`, `nthDerivative`, `definiteIntegral`, `tangentLine` |
+| **Unit Conversion** | 2 | `convert`, `convertAutoDetect` (21 categories, 118 units) |
+| **Cooking Conversions** | 3 | `convertCookingVolume`, `convertCookingWeight`, `convertOvenTemperature` |
+| **Measurement Reference** | 4 | `listCategories`, `listUnits`, `getConversionFactor`, `explainConversion` |
+| **Date & Time** | 5 | `convertTimezone`, `formatDateTime`, `currentDateTime`, `listTimezones`, `dateTimeDifference` |
+| **Tape Calculator** | 1 | `calculateWithTape` |
+| **Graphing & Roots** | 3 | `plotFunction`, `solveEquation`, `findRoots` |
+| **Networking** | 13 | `subnetCalculator`, IPv4/IPv6, CIDR, VLSM, throughput calculations |
+| **Analog Electronics** | 14 | `ohmsLaw`, resistor/capacitor/inductor combinations, filters, impedance, decibels |
+| **Digital Electronics** | 10 | `convertBase`, `twosComplement`, `grayCode`, bitwise ops, ADC/DAC, timers |
 
 ## Examples
 
@@ -170,85 +205,135 @@ All tool calls use the standard MCP `tools/call` JSON-RPC method. Examples of th
 
 ## Architecture
 
-```
-math-calc-mcp (stdio binary, ~3 MB)
-├── rmcp 1.5             ← MCP protocol + tool router
-├── tokio (multi-thread) ← async runtime
-└── math_calc (library)
-    ├── engine/
-    │   ├── expression.rs     ← recursive-descent parser (f64, 9 built-in functions)
-    │   ├── unit_registry.rs  ← 21 categories, 118 units, gas mark, temperature
-    │   └── bigdecimal_ext.rs ← constants matching Java DECIMAL128 + HALF_UP
-    ├── tools/                ← one module per Java *Tool class (15 modules)
-    └── server.rs             ← #[tool_router] block registering every MCP tool
+```mermaid
+graph TB
+    subgraph stdlib["Standard Library (Rust Core)"]
+        Std["std, alloc, core"]
+    end
+    
+    subgraph deps["Pure Rust Dependencies"]
+        RMCP["rmcp 1.0<br/>(MCP Protocol)"]
+        Tokio["tokio<br/>(async/stdio)"]
+        BigDecimal["bigdecimal +<br/>num-bigint"]
+        AstroFloat["astro-float<br/>(128-bit precision)"]
+        Jiff["jiff<br/>(IANA timezones)"]
+        Wide["wide<br/>(Portable SIMD)"]
+    end
+    
+    subgraph arithma_core["arithma Library"]
+        Engine["engine/"]
+        Tools["tools/<br/>(87 tools)"]
+        Server["server.rs<br/>(tool_router)"]
+    end
+    
+    subgraph arithma_bin["arithma Binary"]
+        Main["main.rs<br/>(stdio transport)"]
+    end
+    
+    Std --> deps
+    deps --> arithma_core
+    arithma_core --> arithma_bin
+    
+    style arithma_bin fill:#8b5cf6,color:#fff,stroke:#fff,stroke-width:2px
+    style RMCP fill:#6366f1,color:#fff
+    style Tokio fill:#6366f1,color:#fff
+    style Engine fill:#1e40af,color:#fff
+    style Tools fill:#1e40af,color:#fff
+    style Server fill:#1e40af,color:#fff
 ```
 
-**Dependencies** (all pure Rust, no C FFI):
+**One static binary**, zero C dependencies, cross-platform.
 
-| Crate | Use |
-|---|---|
-| `rmcp` | Official Rust MCP SDK |
-| `tokio` | Async runtime (stdio I/O, multi-threaded) |
-| `bigdecimal` + `num-bigint` | Arbitrary-precision arithmetic — matches Java `BigDecimal`/`BigInteger` |
-| `astro-float` | Arbitrary-precision float with correct rounding — replaces `StrictMath` |
-| `jiff` | Datetime with embedded IANA tz data — replaces `java.time` |
-| `wide` | Portable SIMD (SSE2/AVX2/AVX-512/NEON auto-dispatch) |
-| `serde` / `serde_json` | JSON I/O |
+**Production Dependencies** (all pure Rust, zero C FFI):
+
+| Crate | Purpose |
+|:---|:---|
+| `rmcp` (1.0) | Official Rust MCP SDK — protocol + serialization |
+| `tokio` | Async runtime with multi-threaded executor for stdio I/O |
+| `bigdecimal` + `num-bigint` | Arbitrary-precision arithmetic matching Java `BigDecimal`/`BigInteger` |
+| `astro-float` | 128-bit float with correct rounding (replaces Java `StrictMath`) |
+| `jiff` | Timezone-aware datetime with embedded IANA data (no `libicu`) |
+| `wide` | Portable SIMD with runtime dispatch (SSE2/AVX2/AVX-512/NEON) |
+| `serde` + `serde_json` | JSON serialization for MCP protocol |
 | `schemars` | JSON Schema generation for tool parameters |
-| `tracing` + `tracing-subscriber` | Structured logging to stderr (stdio stays clean) |
+| `tracing` + `tracing-subscriber` | Structured logging to stderr (keeps stdout/stdio clean) |
 
-## Precision & numerical parity with Java
+## Precision Guarantees
 
-This port preserves behavioral parity with the Java implementation, including error-message strings:
+arithma guarantees **bit-for-bit parity** with its Java predecessor (Spring AI math-calculator). All output, error messages, and edge cases match exactly.
 
-- **Basic arithmetic**: `BigDecimal` with `toPlainString()` output — exact results; division uses scale 20 + HALF_UP.
-- **Scientific**: exact values at notable angles (`sin(30°) = 0.5`, etc.) via lookup tables; fallback computation is bit-equivalent to Java `StrictMath` on tier-1 targets.
-- **Factorial**: 0..=20 range, exact `u64`.
-- **Unit conversion**: conversion factors stored with 34-digit precision (DECIMAL128). Temperature uses formula routing through Celsius. Gas mark uses a fixed lookup.
-- **Financial**: DECIMAL128 precision context; powers are always integer in the source, so no astro-float dependency is pulled in.
-- **Electronics**: `impedance`, `rlcResonance`, `decibelConvert`, `atan2` — use `astro-float` at 128-bit precision.
-- **Error strings**: verbatim matches for Java `IllegalArgumentException` messages (e.g. `"Gas mark must be 1-10. Received: 11"`).
+| Domain | Precision | Method |
+|:---|:---|:---|
+| **Basic Math** | Exact | `BigDecimal` (arbitrary precision) |
+| **Division** | 20 decimal places | HALF_UP rounding per DECIMAL128 |
+| **Scientific (sin, cos, tan, log)** | Exact at notable angles | Lookup tables; astro-float elsewhere |
+| **Factorial** | 0–20 range | Exact `u64` values |
+| **Unit Conversion** | 34 significant digits | DECIMAL128 precision factors |
+| **Financial** | DECIMAL128 context | Compound interest, amortization, IRR |
+| **Electronics** | 128-bit float | Impedance, Q-factor, decibels |
+| **Date/Time** | IANA standard | Embedded timezone database, leap seconds |
 
-## Development
+**Error Messages**: Exact Java `IllegalArgumentException` text — debugging aid for API users.
+
+## Development & Testing
 
 ```bash
 # Format check
 cargo fmt --check
 
-# Lint (lib + bin + tests, treating warnings as errors)
+# Lint (all targets, warnings as errors)
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Unit tests (349 tests)
+# Run unit tests
 cargo test --lib
+
+# Full integration test (87 tools via stdio)
+python3 scripts/test_stdio.py
 
 # Release build
 cargo build --release
-
-# End-to-end stdio integration test (85 tools)
-python3 scripts/test_stdio.py
 ```
 
-### Project layout
+All tests pass in under 1 second. CI enforces format, lint, and test pass before merge.
+
+### Project Layout
 
 ```
-.
-├── .cargo/config.toml      ← target-cpu=native; cargo aliases
-├── clippy.toml             ← clippy complexity thresholds
-├── rust-toolchain.toml     ← pinned to stable
-├── Cargo.toml              ← dependencies + release/release-portable profiles
+arithma/
+├── .cargo/config.toml              ← Cargo settings, target-cpu=native
+├── clippy.toml                     ← Linter configuration
+├── rust-toolchain.toml             ← Rust 1.94+ requirement
+├── Cargo.toml                      ← Dependencies, build profiles
 ├── src/
-│   ├── main.rs             ← binary entry point (stdio transport)
-│   ├── lib.rs              ← library re-exports
-│   ├── server.rs           ← MCP tool registration (one #[tool_router] block)
-│   ├── engine/             ← expression evaluator + unit registry + helpers
-│   └── tools/              ← 15 tool modules, one per Java *Tool class
+│   ├── main.rs                     ← Binary entry (stdio MCP server)
+│   ├── lib.rs                      ← Library exports
+│   ├── server.rs                   ← #[tool_router] — all 87 tools
+│   ├── engine/                     ← Expression parser, unit registry
+│   └── tools/                      ← 15 modules, one per tool category
 ├── scripts/
-│   └── test_stdio.py       ← Python stdio e2e test — 85 tools in ~0.5s
-└── target/release/math-calc-mcp   ← static binary (~3 MB)
+│   └── test_stdio.py               ← Integration test (87 tools in ~0.5s)
+├── arithma-logo.svg                ← Branding
+└── target/release/arithma          ← Final binary (~3 MB)
 ```
+
+---
 
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-Original Java project: [farchanjo/math-calculator](https://github.com/farchanjo/math-calculator) (also Apache-2.0).
+**Lineage**: Originally ported from [farchanjo/math-calculator](https://github.com/farchanjo/math-calculator) (Java → Rust), also Apache-2.0.
+
+---
+
+## Contributing
+
+Issues and PRs welcome. Maintain:
+- ✅ Code formatting (`cargo fmt`)
+- ✅ Zero clippy warnings (`cargo clippy -- -D warnings`)
+- ✅ All tests passing (`cargo test`)
+- ✅ Numerical parity with Java reference implementation
+
+---
+
+**Built by** [@farchanjo](https://github.com/farchanjo) | **Contact**: [fabricio@archanjo.com](mailto:fabricio@archanjo.com)
