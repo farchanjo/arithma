@@ -1,9 +1,9 @@
-//! Port of `DigitalElectronicsTool.java` — base conversion, two's complement,
-//! Gray code, bitwise ops, ADC/DAC, 555-timer, and Nyquist computations.
+//! Digital electronics tooling — base conversion, two's complement, Gray code,
+//! bitwise ops, ADC/DAC, 555-timer, frequency↔period, Nyquist.
 //!
-//! Uses `num_bigint::BigInt` for base conversion and two's complement to match
-//! Java `BigInteger` semantics, and `bigdecimal::BigDecimal` at DECIMAL128 for
-//! analog computations (555 timer, ADC/DAC, frequency↔period, Nyquist).
+//! All public functions return `String` via the shared response envelope
+//! (`crate::mcp::message`). Success responses are inline; errors use the
+//! three-line block form.
 
 use std::num::NonZeroU64;
 use std::str::FromStr;
@@ -15,8 +15,23 @@ use num_traits::{Num, One, Signed, Zero};
 use crate::engine::bigdecimal_ext::{
     DECIMAL128_PRECISION, DIVISION_SCALE, LN2_RECIPROCAL, strip_plain,
 };
+use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
 
-const ERROR_PREFIX: &str = "Error: ";
+// ------------------------------------------------------------------ //
+//  Tool names
+// ------------------------------------------------------------------ //
+
+const CONVERT_BASE: &str = "CONVERT_BASE";
+const TWOS_COMPLEMENT: &str = "TWOS_COMPLEMENT";
+const GRAY_CODE: &str = "GRAY_CODE";
+const BITWISE_OP: &str = "BITWISE_OP";
+const ADC_RESOLUTION: &str = "ADC_RESOLUTION";
+const DAC_OUTPUT: &str = "DAC_OUTPUT";
+const TIMER_555_ASTABLE: &str = "TIMER_555_ASTABLE";
+const TIMER_555_MONOSTABLE: &str = "TIMER_555_MONOSTABLE";
+const FREQUENCY_PERIOD: &str = "FREQUENCY_PERIOD";
+const NYQUIST_RATE: &str = "NYQUIST_RATE";
+
 const TO_TWOS: &str = "toTwos";
 const FROM_TWOS: &str = "fromTwos";
 const TO_GRAY: &str = "toGray";
@@ -24,10 +39,6 @@ const FROM_GRAY: &str = "fromGray";
 const MIN_BASE: i32 = 2;
 const MAX_BASE: i32 = 36;
 const MAX_BITS: i32 = 64;
-
-fn err(msg: impl AsRef<str>) -> String {
-    format!("{ERROR_PREFIX}{}", msg.as_ref())
-}
 
 fn precision() -> NonZeroU64 {
     NonZeroU64::new(DECIMAL128_PRECISION).expect("precision is non-zero")
@@ -49,25 +60,42 @@ fn div_scaled(lhs: &BigDecimal, rhs: &BigDecimal) -> BigDecimal {
     (lhs / rhs).with_scale_round(DIVISION_SCALE, RoundingMode::HalfUp)
 }
 
-fn parse_bd(value: &str, field: &str) -> Result<BigDecimal, String> {
-    BigDecimal::from_str(value.trim()).map_err(|_| format!("Invalid number for {field}: {value}"))
+fn parse_bd(tool: &str, raw: &str, label: &str) -> Result<BigDecimal, String> {
+    BigDecimal::from_str(raw.trim()).map_err(|_| {
+        error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            &format!("{label} is not a valid decimal number"),
+            &format!("{label}={raw}"),
+        )
+    })
 }
 
 fn pow2(bits: u32) -> BigDecimal {
     BigDecimal::from(BigInt::one() << bits)
 }
 
-fn check_base(base: i32) -> Result<(), String> {
+fn check_base(tool: &str, base: i32) -> Result<(), String> {
     if !(MIN_BASE..=MAX_BASE).contains(&base) {
-        Err(format!("Base must be between {MIN_BASE} and {MAX_BASE}"))
+        Err(error_with_detail(
+            tool,
+            ErrorCode::OutOfRange,
+            &format!("base must be between {MIN_BASE} and {MAX_BASE}"),
+            &format!("base={base}"),
+        ))
     } else {
         Ok(())
     }
 }
 
-fn check_bit_width(bits: i32) -> Result<(), String> {
+fn check_bit_width(tool: &str, bits: i32) -> Result<(), String> {
     if !(1..=MAX_BITS).contains(&bits) {
-        Err(format!("Bit width must be between 1 and {MAX_BITS}"))
+        Err(error_with_detail(
+            tool,
+            ErrorCode::OutOfRange,
+            &format!("bit width must be between 1 and {MAX_BITS}"),
+            &format!("bits={bits}"),
+        ))
     } else {
         Ok(())
     }
@@ -88,43 +116,73 @@ fn pad_binary(binary: &str, width: usize) -> String {
 
 /// Convert between any two bases (2..=36).
 pub fn convert_base(value: &str, from_base: i32, to_base: i32) -> String {
-    if let Err(msg) = check_base(from_base).and_then(|_| check_base(to_base)) {
-        return err(msg);
+    if let Err(e) = check_base(CONVERT_BASE, from_base) {
+        return e;
+    }
+    if let Err(e) = check_base(CONVERT_BASE, to_base) {
+        return e;
     }
     match BigInt::from_str_radix(value.trim(), from_base as u32) {
-        Ok(big) => big.to_str_radix(to_base as u32).to_uppercase(),
-        Err(_) => err(format!("Invalid number '{value}' for base {from_base}")),
+        Ok(big) => Response::ok(CONVERT_BASE)
+            .result(big.to_str_radix(to_base as u32).to_uppercase())
+            .build(),
+        Err(_) => error_with_detail(
+            CONVERT_BASE,
+            ErrorCode::ParseError,
+            &format!("invalid number for base {from_base}"),
+            &format!("value={value}"),
+        ),
     }
 }
 
 /// Two's-complement encode (`toTwos`) or decode (`fromTwos`).
 pub fn twos_complement(value: &str, bits: i32, direction: &str) -> String {
-    if let Err(msg) = check_bit_width(bits) {
-        return err(msg);
+    if let Err(e) = check_bit_width(TWOS_COMPLEMENT, bits) {
+        return e;
     }
     let bits_u = bits as u32;
     match direction {
         TO_TWOS => encode_to_twos(value, bits_u),
         FROM_TWOS => decode_from_twos(value, bits_u),
-        _ => err(format!("Direction must be '{TO_TWOS}' or '{FROM_TWOS}'")),
+        _ => error_with_detail(
+            TWOS_COMPLEMENT,
+            ErrorCode::InvalidInput,
+            &format!("direction must be '{TO_TWOS}' or '{FROM_TWOS}'"),
+            &format!("direction={direction}"),
+        ),
     }
 }
 
 fn encode_to_twos(value: &str, bits: u32) -> String {
     let parsed = match BigInt::from_str(value.trim()) {
         Ok(v) => v,
-        Err(_) => return err(format!("Invalid decimal value: {value}")),
+        Err(_) => {
+            return error_with_detail(
+                TWOS_COMPLEMENT,
+                ErrorCode::ParseError,
+                "value is not a valid integer",
+                &format!("value={value}"),
+            );
+        }
     };
     let mask: BigInt = (BigInt::one() << bits) - BigInt::one();
     let twos = parsed & mask;
-    pad_binary(&twos.to_str_radix(2), bits as usize)
+    let encoded = pad_binary(&twos.to_str_radix(2), bits as usize);
+    Response::ok(TWOS_COMPLEMENT).result(encoded).build()
 }
 
 fn decode_from_twos(value: &str, bits: u32) -> String {
     let trimmed = value.trim();
     let parsed = match BigInt::from_str_radix(trimmed, 2) {
         Ok(v) => v,
-        Err(_) => return err(format!("Invalid binary value: {value}")),
+        Err(_) => {
+            return error_with_detail(
+                TWOS_COMPLEMENT,
+                ErrorCode::ParseError,
+                "value is not a valid binary string",
+                &format!("value={value}"),
+            );
+        }
     };
     let msb_set = trimmed.starts_with('1') && trimmed.len() == bits as usize;
     let result = if msb_set {
@@ -132,21 +190,34 @@ fn decode_from_twos(value: &str, bits: u32) -> String {
     } else {
         parsed
     };
-    result.to_string()
+    Response::ok(TWOS_COMPLEMENT).result(result.to_string()).build()
 }
 
 /// Gray-code encode (`toGray`) or decode (`fromGray`).
 pub fn gray_code(value: &str, direction: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.chars().any(|c| c != '0' && c != '1') {
-        return err(format!("Invalid binary value: {value}"));
+        return error_with_detail(
+            GRAY_CODE,
+            ErrorCode::ParseError,
+            "value is not a valid binary string",
+            &format!("value={value}"),
+        );
     }
     let width = trimmed.len();
-    match direction {
+    let encoded = match direction {
         TO_GRAY => encode_binary_to_gray(trimmed, width),
         FROM_GRAY => decode_gray_to_binary(trimmed, width),
-        _ => err(format!("Direction must be '{TO_GRAY}' or '{FROM_GRAY}'")),
-    }
+        _ => {
+            return error_with_detail(
+                GRAY_CODE,
+                ErrorCode::InvalidInput,
+                &format!("direction must be '{TO_GRAY}' or '{FROM_GRAY}'"),
+                &format!("direction={direction}"),
+            );
+        }
+    };
+    Response::ok(GRAY_CODE).result(encoded).build()
 }
 
 fn encode_binary_to_gray(binary: &str, width: usize) -> String {
@@ -166,11 +237,18 @@ fn decode_gray_to_binary(binary: &str, width: usize) -> String {
     pad_binary(&num.to_str_radix(2), width)
 }
 
-/// Bitwise AND/OR/XOR/NOT/SHL/SHR. Output JSON `{decimal, binary}`.
+/// Bitwise AND/OR/XOR/NOT/SHL/SHR. Returns the decimal result.
 pub fn bitwise_op(a: &str, b: &str, operation: &str) -> String {
     let val_a = match BigInt::from_str(a.trim()) {
         Ok(v) => v,
-        Err(_) => return err(format!("Invalid operand A: {a}")),
+        Err(_) => {
+            return error_with_detail(
+                BITWISE_OP,
+                ErrorCode::ParseError,
+                "operand A is not a valid integer",
+                &format!("a={a}"),
+            );
+        }
     };
     let op = operation.to_ascii_uppercase();
     let computed: Option<BigInt> = match op.as_str() {
@@ -180,136 +258,180 @@ pub fn bitwise_op(a: &str, b: &str, operation: &str) -> String {
         "NOT" => Some(!val_a.clone()),
         "SHL" => b.trim().parse::<u32>().ok().map(|shift| &val_a << shift),
         "SHR" => b.trim().parse::<u32>().ok().map(|shift| &val_a >> shift),
-        _ => return err(format!("Unknown operation: {op}")),
+        _ => {
+            return error_with_detail(
+                BITWISE_OP,
+                ErrorCode::InvalidInput,
+                "unknown operation",
+                &format!("operation={operation}"),
+            );
+        }
     };
     match computed {
-        Some(value) => {
-            let binary = if value.is_negative() {
-                format!("-{}", (-&value).to_str_radix(2))
-            } else {
-                value.to_str_radix(2)
-            };
-            format!("{{\"decimal\":\"{}\",\"binary\":\"{}\"}}", value, binary)
-        }
-        None => err(format!("Invalid operand B: {b}")),
+        Some(value) => Response::ok(BITWISE_OP).result(value.to_string()).build(),
+        None => error_with_detail(
+            BITWISE_OP,
+            ErrorCode::ParseError,
+            "operand B is not a valid integer",
+            &format!("b={b}"),
+        ),
     }
 }
 
 /// ADC resolution: `lsb = Vref / 2^bits`, `stepCount = 2^bits - 1`.
 pub fn adc_resolution(bits: i32, vref: &str) -> String {
-    let result = (|| -> Result<String, String> {
-        if !(1..=MAX_BITS).contains(&bits) {
-            return Err(format!("Bit width must be between 1 and {MAX_BITS}"));
-        }
-        let vref_v = parse_bd(vref, "vref")?;
-        let levels = pow2(bits as u32);
-        let lsb = div_scaled(&vref_v, &levels);
-        let step_count = sub_ctx(&levels, &BigDecimal::from(1));
-        Ok(format!(
-            "{{\"lsb\":\"{}\",\"stepCount\":\"{}\",\"bits\":{}}}",
-            strip_plain(&lsb),
-            strip_plain(&step_count),
-            bits
-        ))
-    })();
-    result.unwrap_or_else(err)
+    if let Err(e) = check_bit_width(ADC_RESOLUTION, bits) {
+        return e;
+    }
+    let vref_v = match parse_bd(ADC_RESOLUTION, vref, "vref") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let levels = pow2(bits as u32);
+    let lsb = div_scaled(&vref_v, &levels);
+    let step_count = sub_ctx(&levels, &BigDecimal::from(1));
+    Response::ok(ADC_RESOLUTION)
+        .field("BITS", bits.to_string())
+        .field("LSB", strip_plain(&lsb))
+        .field("STEP_COUNT", strip_plain(&step_count))
+        .build()
 }
 
 /// DAC output voltage: Vout = Vref * code / 2^bits.
 pub fn dac_output(bits: i32, vref: &str, code: i64) -> String {
-    let result = (|| -> Result<String, String> {
-        if !(1..=MAX_BITS).contains(&bits) {
-            return Err(format!("Bit width must be between 1 and {MAX_BITS}"));
-        }
-        // Use i128 to compute max_code for bits up to 63 safely; bits==64 would overflow i64.
-        let max_code: i128 = if bits == 64 {
-            i128::from(i64::MAX)
-        } else {
-            (1_i128 << bits) - 1
-        };
-        if i128::from(code) < 0 || i128::from(code) > max_code {
-            return Err(format!("Code must be between 0 and {max_code}"));
-        }
-        let vref_v = parse_bd(vref, "vref")?;
-        let levels = pow2(bits as u32);
-        let vout = div_scaled(&mul_ctx(&vref_v, &BigDecimal::from(code)), &levels);
-        Ok(strip_plain(&vout))
-    })();
-    result.unwrap_or_else(err)
+    if let Err(e) = check_bit_width(DAC_OUTPUT, bits) {
+        return e;
+    }
+    let max_code: i128 = if bits == 64 {
+        i128::from(i64::MAX)
+    } else {
+        (1_i128 << bits) - 1
+    };
+    if i128::from(code) < 0 || i128::from(code) > max_code {
+        return error_with_detail(
+            DAC_OUTPUT,
+            ErrorCode::OutOfRange,
+            &format!("code must be between 0 and {max_code}"),
+            &format!("code={code}"),
+        );
+    }
+    let vref_v = match parse_bd(DAC_OUTPUT, vref, "vref") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let levels = pow2(bits as u32);
+    let vout = div_scaled(&mul_ctx(&vref_v, &BigDecimal::from(code)), &levels);
+    Response::ok(DAC_OUTPUT)
+        .field("BITS", bits.to_string())
+        .field("CODE", code.to_string())
+        .field("VOUT", strip_plain(&vout))
+        .build()
 }
 
-/// 555-timer astable output: frequency, dutyCycle (%), period.
+/// 555-timer astable output: frequency, period, dutyCycle (%), high/low time.
 pub fn timer_555_astable(r1: &str, r2: &str, c: &str) -> String {
-    let result = (|| -> Result<String, String> {
-        let r1_v = parse_bd(r1, "R1")?;
-        let r2_v = parse_bd(r2, "R2")?;
-        let c_v = parse_bd(c, "C")?;
-        let two = BigDecimal::from(2);
-        let r1_plus_2r2 = add_ctx(&r1_v, &mul_ctx(&r2_v, &two));
-        let denominator = mul_ctx(&r1_plus_2r2, &c_v);
-        if denominator.is_zero() {
-            return Err("(R1 + 2R2)*C must not be zero".to_string());
-        }
-        let freq = div_scaled(&LN2_RECIPROCAL, &denominator);
-        if freq.is_zero() {
-            return Err("Frequency must not be zero".to_string());
-        }
-        let period = div_scaled(&BigDecimal::from(1), &freq);
-        let r1_plus_r2 = add_ctx(&r1_v, &r2_v);
-        let duty = mul_ctx(
-            &div_scaled(&r1_plus_r2, &r1_plus_2r2),
-            &BigDecimal::from(100),
+    let r1_v = match parse_bd(TIMER_555_ASTABLE, r1, "r1") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let r2_v = match parse_bd(TIMER_555_ASTABLE, r2, "r2") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let c_v = match parse_bd(TIMER_555_ASTABLE, c, "c") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let two = BigDecimal::from(2);
+    let r1_plus_2r2 = add_ctx(&r1_v, &mul_ctx(&r2_v, &two));
+    let denominator = mul_ctx(&r1_plus_2r2, &c_v);
+    if denominator.is_zero() {
+        return error(
+            TIMER_555_ASTABLE,
+            ErrorCode::DivisionByZero,
+            "(R1 + 2·R2)·C must not be zero",
         );
-        Ok(format!(
-            "{{\"frequency\":\"{}\",\"dutyCycle\":\"{}\",\"period\":\"{}\"}}",
-            strip_plain(&freq),
-            strip_plain(&duty),
-            strip_plain(&period)
-        ))
-    })();
-    result.unwrap_or_else(err)
+    }
+    let freq = div_scaled(&LN2_RECIPROCAL, &denominator);
+    if freq.is_zero() {
+        return error(
+            TIMER_555_ASTABLE,
+            ErrorCode::DivisionByZero,
+            "frequency must not be zero",
+        );
+    }
+    let period = div_scaled(&BigDecimal::from(1), &freq);
+    let r1_plus_r2 = add_ctx(&r1_v, &r2_v);
+    let duty = mul_ctx(
+        &div_scaled(&r1_plus_r2, &r1_plus_2r2),
+        &BigDecimal::from(100),
+    );
+    let ln2_literal = BigDecimal::from_str("0.69314718055994530941723212145817656808")
+        .expect("valid ln(2) literal");
+    let high_time = mul_ctx(&mul_ctx(&ln2_literal, &r1_plus_r2), &c_v);
+    let low_time = mul_ctx(&mul_ctx(&ln2_literal, &r2_v), &c_v);
+    Response::ok(TIMER_555_ASTABLE)
+        .field("FREQUENCY", strip_plain(&freq))
+        .field("PERIOD", strip_plain(&period))
+        .field("DUTY_CYCLE", strip_plain(&duty))
+        .field("HIGH_TIME", strip_plain(&high_time))
+        .field("LOW_TIME", strip_plain(&low_time))
+        .build()
 }
 
 /// 555-timer monostable pulse width: 1.1 * R * C.
 pub fn timer_555_monostable(r: &str, c: &str) -> String {
-    let result = (|| -> Result<String, String> {
-        let r_v = parse_bd(r, "R")?;
-        let c_v = parse_bd(c, "C")?;
-        let constant: BigDecimal = "1.1".parse().expect("valid constant");
-        let pulse = mul_ctx(&mul_ctx(&constant, &r_v), &c_v);
-        Ok(format!("{{\"pulseWidth\":\"{}\"}}", strip_plain(&pulse)))
-    })();
-    result.unwrap_or_else(err)
+    let r_v = match parse_bd(TIMER_555_MONOSTABLE, r, "r") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let c_v = match parse_bd(TIMER_555_MONOSTABLE, c, "c") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let constant: BigDecimal = "1.1".parse().expect("valid constant");
+    let pulse = mul_ctx(&mul_ctx(&constant, &r_v), &c_v);
+    Response::ok(TIMER_555_MONOSTABLE)
+        .field("PULSE_WIDTH", strip_plain(&pulse))
+        .build()
 }
 
 /// Convert between frequency and period (reciprocal).
 pub fn frequency_period(value: &str, mode: &str) -> String {
-    let result = (|| -> Result<String, String> {
-        match mode {
-            "freqToPeriod" | "periodToFreq" => {}
-            _ => return Err("Mode must be 'freqToPeriod' or 'periodToFreq'".to_string()),
+    match mode {
+        "freqToPeriod" | "periodToFreq" => {}
+        _ => {
+            return error_with_detail(
+                FREQUENCY_PERIOD,
+                ErrorCode::InvalidInput,
+                "mode must be 'freqToPeriod' or 'periodToFreq'",
+                &format!("mode={mode}"),
+            );
         }
-        let val = parse_bd(value, "value")?;
-        if val.is_zero() || val.is_negative() {
-            return Err("Value must be positive".to_string());
-        }
-        Ok(strip_plain(&div_scaled(&BigDecimal::from(1), &val)))
-    })();
-    result.unwrap_or_else(err)
+    }
+    let val = match parse_bd(FREQUENCY_PERIOD, value, "value") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if val.is_zero() || val.is_negative() {
+        return error(
+            FREQUENCY_PERIOD,
+            ErrorCode::InvalidInput,
+            "value must be positive",
+        );
+    }
+    let out = div_scaled(&BigDecimal::from(1), &val);
+    Response::ok(FREQUENCY_PERIOD).result(strip_plain(&out)).build()
 }
 
 /// Nyquist minimum sampling rate: 2 × bandwidth.
 pub fn nyquist_rate(bandwidth_hz: &str) -> String {
-    let result = (|| -> Result<String, String> {
-        let bw = parse_bd(bandwidth_hz, "bandwidth")?;
-        let min_rate = mul_ctx(&bw, &BigDecimal::from(2));
-        Ok(format!(
-            "{{\"minSampleRate\":\"{}\",\"bandwidth\":\"{}\"}}",
-            strip_plain(&min_rate),
-            strip_plain(&bw)
-        ))
-    })();
-    result.unwrap_or_else(err)
+    let bw = match parse_bd(NYQUIST_RATE, bandwidth_hz, "bandwidth") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let min_rate = mul_ctx(&bw, &BigDecimal::from(2));
+    Response::ok(NYQUIST_RATE).result(strip_plain(&min_rate)).build()
 }
 
 #[cfg(test)]
@@ -318,66 +440,89 @@ mod tests {
 
     #[test]
     fn convert_base_decimal_to_hex() {
-        assert_eq!(convert_base("255", 10, 16), "FF");
+        assert_eq!(
+            convert_base("255", 10, 16),
+            "CONVERT_BASE: OK | RESULT: FF"
+        );
     }
 
     #[test]
     fn convert_base_binary_to_decimal() {
-        assert_eq!(convert_base("1010", 2, 10), "10");
+        assert_eq!(
+            convert_base("1010", 2, 10),
+            "CONVERT_BASE: OK | RESULT: 10"
+        );
     }
 
     #[test]
     fn convert_base_hex_to_binary() {
-        assert_eq!(convert_base("FF", 16, 2), "11111111");
+        assert_eq!(
+            convert_base("FF", 16, 2),
+            "CONVERT_BASE: OK | RESULT: 11111111"
+        );
     }
 
     #[test]
     fn convert_base_bad_base_errors() {
         assert_eq!(
             convert_base("10", 1, 10),
-            "Error: Base must be between 2 and 36"
+            "CONVERT_BASE: ERROR\nREASON: [OUT_OF_RANGE] base must be between 2 and 36\nDETAIL: base=1"
         );
         assert_eq!(
             convert_base("10", 10, 37),
-            "Error: Base must be between 2 and 36"
+            "CONVERT_BASE: ERROR\nREASON: [OUT_OF_RANGE] base must be between 2 and 36\nDETAIL: base=37"
         );
     }
 
     #[test]
     fn convert_base_invalid_digit_errors() {
-        let out = convert_base("XYZ", 10, 16);
-        assert!(out.starts_with("Error:"), "got: {out}");
+        assert_eq!(
+            convert_base("XYZ", 10, 16),
+            "CONVERT_BASE: ERROR\nREASON: [PARSE_ERROR] invalid number for base 10\nDETAIL: value=XYZ"
+        );
     }
 
     #[test]
     fn twos_complement_negative_eight_bit() {
-        assert_eq!(twos_complement("-5", 8, "toTwos"), "11111011");
+        assert_eq!(
+            twos_complement("-5", 8, "toTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: 11111011"
+        );
     }
 
     #[test]
     fn twos_complement_positive_eight_bit() {
-        assert_eq!(twos_complement("5", 8, "toTwos"), "00000101");
+        assert_eq!(
+            twos_complement("5", 8, "toTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: 00000101"
+        );
     }
 
     #[test]
     fn twos_complement_roundtrip_negative() {
-        assert_eq!(twos_complement("11111011", 8, "fromTwos"), "-5");
+        assert_eq!(
+            twos_complement("11111011", 8, "fromTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: -5"
+        );
     }
 
     #[test]
     fn twos_complement_roundtrip_positive() {
-        assert_eq!(twos_complement("00000101", 8, "fromTwos"), "5");
+        assert_eq!(
+            twos_complement("00000101", 8, "fromTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: 5"
+        );
     }
 
     #[test]
     fn twos_complement_bad_bits_errors() {
         assert_eq!(
             twos_complement("5", 0, "toTwos"),
-            "Error: Bit width must be between 1 and 64"
+            "TWOS_COMPLEMENT: ERROR\nREASON: [OUT_OF_RANGE] bit width must be between 1 and 64\nDETAIL: bits=0"
         );
         assert_eq!(
             twos_complement("5", 65, "toTwos"),
-            "Error: Bit width must be between 1 and 64"
+            "TWOS_COMPLEMENT: ERROR\nREASON: [OUT_OF_RANGE] bit width must be between 1 and 64\nDETAIL: bits=65"
         );
     }
 
@@ -385,147 +530,173 @@ mod tests {
     fn twos_complement_bad_direction_errors() {
         assert_eq!(
             twos_complement("5", 8, "toward"),
-            "Error: Direction must be 'toTwos' or 'fromTwos'"
+            "TWOS_COMPLEMENT: ERROR\nREASON: [INVALID_INPUT] direction must be 'toTwos' or 'fromTwos'\nDETAIL: direction=toward"
         );
     }
 
     #[test]
     fn gray_code_to_gray() {
-        assert_eq!(gray_code("1010", "toGray"), "1111");
+        assert_eq!(
+            gray_code("1010", "toGray"),
+            "GRAY_CODE: OK | RESULT: 1111"
+        );
     }
 
     #[test]
     fn gray_code_from_gray_roundtrip() {
-        assert_eq!(gray_code("1111", "fromGray"), "1010");
+        assert_eq!(
+            gray_code("1111", "fromGray"),
+            "GRAY_CODE: OK | RESULT: 1010"
+        );
     }
 
     #[test]
     fn gray_code_bad_direction_errors() {
         assert_eq!(
             gray_code("1010", "flip"),
-            "Error: Direction must be 'toGray' or 'fromGray'"
+            "GRAY_CODE: ERROR\nREASON: [INVALID_INPUT] direction must be 'toGray' or 'fromGray'\nDETAIL: direction=flip"
         );
     }
 
     #[test]
     fn gray_code_invalid_binary_errors() {
-        assert!(gray_code("102", "toGray").starts_with("Error:"));
+        assert_eq!(
+            gray_code("102", "toGray"),
+            "GRAY_CODE: ERROR\nREASON: [PARSE_ERROR] value is not a valid binary string\nDETAIL: value=102"
+        );
     }
 
     #[test]
     fn bitwise_and_ones() {
-        let json = bitwise_op("12", "10", "AND");
-        assert!(json.contains("\"decimal\":\"8\""));
-        assert!(json.contains("\"binary\":\"1000\""));
+        assert_eq!(
+            bitwise_op("12", "10", "AND"),
+            "BITWISE_OP: OK | RESULT: 8"
+        );
     }
 
     #[test]
     fn bitwise_or_simple() {
-        let json = bitwise_op("12", "10", "OR");
-        assert!(json.contains("\"decimal\":\"14\""));
+        assert_eq!(
+            bitwise_op("12", "10", "OR"),
+            "BITWISE_OP: OK | RESULT: 14"
+        );
     }
 
     #[test]
     fn bitwise_xor_simple() {
-        let json = bitwise_op("12", "10", "XOR");
-        assert!(json.contains("\"decimal\":\"6\""));
+        assert_eq!(
+            bitwise_op("12", "10", "XOR"),
+            "BITWISE_OP: OK | RESULT: 6"
+        );
     }
 
     #[test]
     fn bitwise_shl() {
-        let json = bitwise_op("1", "4", "SHL");
-        assert!(json.contains("\"decimal\":\"16\""));
-        assert!(json.contains("\"binary\":\"10000\""));
+        assert_eq!(
+            bitwise_op("1", "4", "SHL"),
+            "BITWISE_OP: OK | RESULT: 16"
+        );
     }
 
     #[test]
     fn bitwise_shr() {
-        let json = bitwise_op("16", "4", "SHR");
-        assert!(json.contains("\"decimal\":\"1\""));
+        assert_eq!(
+            bitwise_op("16", "4", "SHR"),
+            "BITWISE_OP: OK | RESULT: 1"
+        );
     }
 
     #[test]
     fn bitwise_unknown_op_errors() {
         assert_eq!(
             bitwise_op("1", "1", "NAND"),
-            "Error: Unknown operation: NAND"
+            "BITWISE_OP: ERROR\nREASON: [INVALID_INPUT] unknown operation\nDETAIL: operation=NAND"
         );
     }
 
     #[test]
     fn adc_resolution_ten_bit() {
-        let json = adc_resolution(10, "5");
-        // lsb = 5/1024 ≈ 0.00488281...
-        assert!(json.contains("\"bits\":10"));
-        assert!(json.contains("\"stepCount\":\"1023\""));
-        let start = json.find("\"lsb\":\"").unwrap() + "\"lsb\":\"".len();
-        let rest = &json[start..];
-        let end = rest.find('"').unwrap();
-        let lsb: f64 = rest[..end].parse().unwrap();
-        assert!((lsb - 5.0 / 1024.0).abs() < 1e-10, "lsb = {lsb}");
+        // lsb = 5/1024 to 20 digits HalfUp, step = 1023
+        assert_eq!(
+            adc_resolution(10, "5"),
+            "ADC_RESOLUTION: OK | BITS: 10 | LSB: 0.0048828125 | STEP_COUNT: 1023"
+        );
     }
 
     #[test]
     fn adc_resolution_bad_bits_errors() {
         assert_eq!(
             adc_resolution(0, "5"),
-            "Error: Bit width must be between 1 and 64"
+            "ADC_RESOLUTION: ERROR\nREASON: [OUT_OF_RANGE] bit width must be between 1 and 64\nDETAIL: bits=0"
         );
     }
 
     #[test]
     fn dac_output_midpoint() {
         // bits=10, vref=5, code=512 → 5*512/1024 = 2.5
-        assert_eq!(dac_output(10, "5", 512), "2.5");
+        assert_eq!(
+            dac_output(10, "5", 512),
+            "DAC_OUTPUT: OK | BITS: 10 | CODE: 512 | VOUT: 2.5"
+        );
     }
 
     #[test]
     fn dac_output_out_of_range_errors() {
         assert_eq!(
             dac_output(8, "5", 1000),
-            "Error: Code must be between 0 and 255"
+            "DAC_OUTPUT: ERROR\nREASON: [OUT_OF_RANGE] code must be between 0 and 255\nDETAIL: code=1000"
         );
         assert_eq!(
             dac_output(8, "5", -1),
-            "Error: Code must be between 0 and 255"
+            "DAC_OUTPUT: ERROR\nREASON: [OUT_OF_RANGE] code must be between 0 and 255\nDETAIL: code=-1"
         );
     }
 
     #[test]
-    fn timer_555_astable_sensible_duty() {
-        let json = timer_555_astable("1000", "1000", "0.000001");
-        // f = 1.4427/(3000*1e-6) = ~480.9 Hz, duty = 2000/3000 * 100 ≈ 66.67
-        assert!(json.contains("\"frequency\""));
-        assert!(json.contains("\"dutyCycle\""));
-        let start = json.find("\"dutyCycle\":\"").unwrap() + "\"dutyCycle\":\"".len();
-        let rest = &json[start..];
-        let end = rest.find('"').unwrap();
+    fn timer_555_astable_all_fields_present() {
+        let out = timer_555_astable("1000", "1000", "0.000001");
+        assert!(out.starts_with("TIMER_555_ASTABLE: OK | FREQUENCY: "), "got: {out}");
+        assert!(out.contains(" | PERIOD: "));
+        assert!(out.contains(" | DUTY_CYCLE: "));
+        assert!(out.contains(" | HIGH_TIME: "));
+        assert!(out.contains(" | LOW_TIME: "));
+        // Duty cycle ≈ 66.666...
+        let anchor = out.find(" | DUTY_CYCLE: ").unwrap() + " | DUTY_CYCLE: ".len();
+        let rest = &out[anchor..];
+        let end = rest.find(' ').map_or(rest.len(), |i| i);
         let duty: f64 = rest[..end].parse().unwrap();
         assert!((duty - 66.6666).abs() < 0.01, "duty was {duty}");
     }
 
     #[test]
     fn timer_555_monostable_formula() {
-        // 1.1 * 1000 * 1e-6 = 0.0011
-        let json = timer_555_monostable("1000", "0.000001");
-        assert!(json.contains("\"pulseWidth\":\"0.0011\""), "got: {json}");
+        assert_eq!(
+            timer_555_monostable("1000", "0.000001"),
+            "TIMER_555_MONOSTABLE: OK | PULSE_WIDTH: 0.0011"
+        );
     }
 
     #[test]
     fn frequency_period_freq_to_period() {
-        assert_eq!(frequency_period("1000", "freqToPeriod"), "0.001");
+        assert_eq!(
+            frequency_period("1000", "freqToPeriod"),
+            "FREQUENCY_PERIOD: OK | RESULT: 0.001"
+        );
     }
 
     #[test]
     fn frequency_period_period_to_freq() {
-        assert_eq!(frequency_period("0.001", "periodToFreq"), "1000");
+        assert_eq!(
+            frequency_period("0.001", "periodToFreq"),
+            "FREQUENCY_PERIOD: OK | RESULT: 1000"
+        );
     }
 
     #[test]
     fn frequency_period_bad_mode_errors() {
         assert_eq!(
             frequency_period("10", "flip"),
-            "Error: Mode must be 'freqToPeriod' or 'periodToFreq'"
+            "FREQUENCY_PERIOD: ERROR\nREASON: [INVALID_INPUT] mode must be 'freqToPeriod' or 'periodToFreq'\nDETAIL: mode=flip"
         );
     }
 
@@ -533,18 +704,19 @@ mod tests {
     fn frequency_period_non_positive_errors() {
         assert_eq!(
             frequency_period("0", "freqToPeriod"),
-            "Error: Value must be positive"
+            "FREQUENCY_PERIOD: ERROR\nREASON: [INVALID_INPUT] value must be positive"
         );
         assert_eq!(
             frequency_period("-5", "periodToFreq"),
-            "Error: Value must be positive"
+            "FREQUENCY_PERIOD: ERROR\nREASON: [INVALID_INPUT] value must be positive"
         );
     }
 
     #[test]
     fn nyquist_rate_audio() {
-        let json = nyquist_rate("20000");
-        assert!(json.contains("\"minSampleRate\":\"40000\""), "got: {json}");
-        assert!(json.contains("\"bandwidth\":\"20000\""));
+        assert_eq!(
+            nyquist_rate("20000"),
+            "NYQUIST_RATE: OK | RESULT: 40000"
+        );
     }
 }

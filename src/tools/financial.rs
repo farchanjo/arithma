@@ -2,17 +2,25 @@
 //! matching Java `BigDecimal` + `MathContext.DECIMAL128` semantics (34 digits,
 //! `HALF_UP` rounding).
 //!
-//! Every public entry point mirrors the Java MCP contract: it returns a `String` and
-//! encodes validation failures inline as `"Error: ..."`.
+//! Every public entry point emits the new structured response envelope. Scalar
+//! outputs go inline; the amortization schedule opts into block layout for the
+//! tabular payload.
 
 use std::num::NonZeroU64;
 use std::str::FromStr;
 
 use bigdecimal::{BigDecimal, Context, RoundingMode};
 use num_traits::{ToPrimitive, Zero};
-use serde::Serialize;
 
 use crate::engine::bigdecimal_ext::{DECIMAL128_PRECISION, DIVISION_SCALE, strip_plain};
+use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+
+const TOOL_COMPOUND_INTEREST: &str = "COMPOUND_INTEREST";
+const TOOL_LOAN_PAYMENT: &str = "LOAN_PAYMENT";
+const TOOL_PRESENT_VALUE: &str = "PRESENT_VALUE";
+const TOOL_FUTURE_VALUE_ANNUITY: &str = "FUTURE_VALUE_ANNUITY";
+const TOOL_RETURN_ON_INVESTMENT: &str = "RETURN_ON_INVESTMENT";
+const TOOL_AMORTIZATION_SCHEDULE: &str = "AMORTIZATION_SCHEDULE";
 
 const DISPLAY_SCALE: i64 = 2;
 const MONTHS_PER_YEAR: i64 = 12;
@@ -33,28 +41,46 @@ fn one() -> BigDecimal {
     BigDecimal::from(1)
 }
 
-/// Parse a decimal string into a `BigDecimal`, returning a Java-style error message.
-fn parse(input: &str, field: &str) -> Result<BigDecimal, String> {
-    BigDecimal::from_str(input).map_err(|_| format!("Invalid {field}: '{input}'"))
+/// Parse a decimal string into a `BigDecimal`, returning the error envelope on
+/// failure with DETAIL echoing the offending input.
+fn parse_field(tool: &str, label: &str, raw: &str) -> Result<BigDecimal, String> {
+    BigDecimal::from_str(raw).map_err(|_| {
+        error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            "operand is not a valid decimal number",
+            &format!("{label}={raw}"),
+        )
+    })
 }
 
-fn validate_positive(value: &BigDecimal, name: &str) -> Result<(), String> {
+fn require_positive(tool: &str, value: &BigDecimal, label: &str) -> Result<(), String> {
     if value <= &BigDecimal::zero() {
-        Err(format!("{name} must be greater than zero"))
+        Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            &format!("{label} must be greater than zero"),
+            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+        ))
     } else {
         Ok(())
     }
 }
 
-fn validate_non_negative(value: &BigDecimal, name: &str) -> Result<(), String> {
+fn require_non_negative(tool: &str, value: &BigDecimal, label: &str) -> Result<(), String> {
     if value < &BigDecimal::zero() {
-        Err(format!("{name} must not be negative"))
+        Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            &format!("{label} must not be negative"),
+            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+        ))
     } else {
         Ok(())
     }
 }
 
-/// `a + b` at DECIMAL128 precision (mirrors Java `.add(b, PRECISION)`).
+/// `a + b` at DECIMAL128 precision.
 fn add_ctx(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
     (a + b).with_precision_round(
         NonZeroU64::new(DECIMAL128_PRECISION).expect("non-zero"),
@@ -75,28 +101,36 @@ fn mul_ctx(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
     decimal128_ctx().multiply(a, b)
 }
 
-/// Integer-power under DECIMAL128 context (matches Java `.pow(int, PRECISION)`).
+/// Integer-power under DECIMAL128 context.
 fn pow_ctx(base: &BigDecimal, exp: i64) -> BigDecimal {
     base.powi_with_context(exp, &decimal128_ctx())
 }
 
-/// `a / b` at scale 20 with HALF_UP (matches Java `.divide(b, INTERNAL_SCALE, HALF_UP)`).
+/// `a / b` at scale 20 with HALF_UP.
 fn div_scale(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
     (a / b).with_scale_round(DIVISION_SCALE, RoundingMode::HalfUp)
 }
 
 /// Convert a `BigDecimal` that represents an exact integer into `i64`.
-fn int_value_exact(value: &BigDecimal, field: &str) -> Result<i64, String> {
+fn int_value_exact(tool: &str, value: &BigDecimal, label: &str) -> Result<i64, String> {
     let normalized = value.normalized();
-    // A BigDecimal is an exact integer iff its scale ≤ 0 (or equivalently the
-    // fractional part is empty after normalization).
     let fractional = &normalized - normalized.with_scale(0);
     if !fractional.is_zero() {
-        return Err(format!("{field} must be an integer"));
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            &format!("{label} must be an integer"),
+            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+        ));
     }
-    normalized
-        .to_i64()
-        .ok_or_else(|| format!("{field} is out of i64 range"))
+    normalized.to_i64().ok_or_else(|| {
+        error_with_detail(
+            tool,
+            ErrorCode::OutOfRange,
+            &format!("{label} is out of i64 range"),
+            &format!("{}={}", label.to_lowercase(), strip_plain(value)),
+        )
+    })
 }
 
 // --------------------------------------------------------------------------- //
@@ -110,191 +144,234 @@ pub fn compound_interest(
     years: &str,
     compounds_per_year: i64,
 ) -> String {
-    match compute_compound_interest(principal, annual_rate, years, compounds_per_year) {
-        Ok(s) => s,
-        Err(err) => format!("Error: {err}"),
+    let tool = TOOL_COMPOUND_INTEREST;
+    let principal_amt = match parse_field(tool, "principal", principal) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let rate = match parse_field(tool, "annual_rate", annual_rate) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let years_dec = match parse_field(tool, "years", years) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = require_positive(tool, &principal_amt, "Principal") {
+        return e;
     }
-}
-
-fn compute_compound_interest(
-    principal: &str,
-    annual_rate: &str,
-    years: &str,
-    compounds_per_year: i64,
-) -> Result<String, String> {
-    let principal_amt = parse(principal, "principal")?;
-    let rate = parse(annual_rate, "annual rate")?;
-    let years_dec = parse(years, "years")?;
-
-    validate_positive(&principal_amt, "Principal")?;
-    validate_non_negative(&rate, "Annual rate")?;
-    validate_positive(&years_dec, "Years")?;
+    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+        return e;
+    }
+    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+        return e;
+    }
     if compounds_per_year <= 0 {
-        return Err("Compounds per year must be greater than zero".to_string());
+        return error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            "Compounds per year must be greater than zero",
+            &format!("compounds_per_year={compounds_per_year}"),
+        );
     }
-    let compounds_count = BigDecimal::from(compounds_per_year);
 
+    let compounds_count = BigDecimal::from(compounds_per_year);
     let annual_rate_dec = div_scale(&rate, &hundred());
     let rate_over_comp = div_scale(&annual_rate_dec, &compounds_count);
     let one_plus_rate = add_ctx(&one(), &rate_over_comp);
     let total_compounds_dec = mul_ctx(&compounds_count, &years_dec);
-    let total_compounds = int_value_exact(&total_compounds_dec, "Compounds * years")?;
+    let total_compounds = match int_value_exact(tool, &total_compounds_dec, "Compounds * years") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let result = mul_ctx(&principal_amt, &pow_ctx(&one_plus_rate, total_compounds));
-    Ok(strip_plain(&result))
+    Response::ok(tool).result(strip_plain(&result)).build()
 }
 
 /// Monthly loan payment (fixed-rate amortizing loan).
 pub fn loan_payment(principal: &str, annual_rate: &str, years: &str) -> String {
-    match compute_loan_payment(principal, annual_rate, years) {
-        Ok(s) => s,
-        Err(err) => format!("Error: {err}"),
+    let tool = TOOL_LOAN_PAYMENT;
+    let principal_amt = match parse_field(tool, "principal", principal) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let rate = match parse_field(tool, "annual_rate", annual_rate) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let years_dec = match parse_field(tool, "years", years) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = require_positive(tool, &principal_amt, "Principal") {
+        return e;
     }
-}
-
-fn compute_loan_payment(principal: &str, annual_rate: &str, years: &str) -> Result<String, String> {
-    let principal_amt = parse(principal, "principal")?;
-    let rate = parse(annual_rate, "annual rate")?;
-    let years_dec = parse(years, "years")?;
-
-    validate_positive(&principal_amt, "Principal")?;
-    validate_positive(&years_dec, "Years")?;
+    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+        return e;
+    }
+    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+        return e;
+    }
 
     let months = mul_ctx(&years_dec, &BigDecimal::from(MONTHS_PER_YEAR));
-    let total_months = int_value_exact(&months, "Total months")?;
+    let total_months = match int_value_exact(tool, &months, "Total months") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
-    if rate.is_zero() {
-        let payment = div_scale(&principal_amt, &BigDecimal::from(total_months));
-        return Ok(strip_plain(&payment));
-    }
+    let payment = if rate.is_zero() {
+        div_scale(&principal_amt, &BigDecimal::from(total_months))
+    } else {
+        let monthly_rate = div_scale(
+            &div_scale(&rate, &hundred()),
+            &BigDecimal::from(MONTHS_PER_YEAR),
+        );
+        let one_plus_r = add_ctx(&one(), &monthly_rate);
+        let one_plus_r_pow_n = pow_ctx(&one_plus_r, total_months);
+        let numerator = mul_ctx(&mul_ctx(&principal_amt, &monthly_rate), &one_plus_r_pow_n);
+        let denominator = sub_ctx(&one_plus_r_pow_n, &one());
+        div_scale(&numerator, &denominator)
+    };
 
-    let monthly_rate = div_scale(
-        &div_scale(&rate, &hundred()),
-        &BigDecimal::from(MONTHS_PER_YEAR),
-    );
-    let one_plus_r = add_ctx(&one(), &monthly_rate);
-    let one_plus_r_pow_n = pow_ctx(&one_plus_r, total_months);
-
-    let numerator = mul_ctx(&mul_ctx(&principal_amt, &monthly_rate), &one_plus_r_pow_n);
-    let denominator = sub_ctx(&one_plus_r_pow_n, &one());
-
-    let payment = div_scale(&numerator, &denominator);
-    Ok(strip_plain(&payment))
+    Response::ok(tool).result(strip_plain(&payment)).build()
 }
 
 /// Present value of a future amount: `PV = FV / (1 + r)^t`.
 pub fn present_value(future_value: &str, annual_rate: &str, years: &str) -> String {
-    match compute_present_value(future_value, annual_rate, years) {
-        Ok(s) => s,
-        Err(err) => format!("Error: {err}"),
+    let tool = TOOL_PRESENT_VALUE;
+    let future_val = match parse_field(tool, "future_value", future_value) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let rate = match parse_field(tool, "annual_rate", annual_rate) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let years_dec = match parse_field(tool, "years", years) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = require_positive(tool, &future_val, "Future value") {
+        return e;
     }
-}
-
-fn compute_present_value(
-    future_value: &str,
-    annual_rate: &str,
-    years: &str,
-) -> Result<String, String> {
-    let future_val = parse(future_value, "future value")?;
-    let rate = parse(annual_rate, "annual rate")?;
-    let years_dec = parse(years, "years")?;
-
-    validate_positive(&future_val, "Future value")?;
-    validate_positive(&years_dec, "Years")?;
+    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+        return e;
+    }
+    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+        return e;
+    }
 
     let annual_rate_dec = div_scale(&rate, &hundred());
     let one_plus_r = add_ctx(&one(), &annual_rate_dec);
-    let exponent = int_value_exact(&years_dec, "Years")?;
+    let exponent = match int_value_exact(tool, &years_dec, "Years") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let divisor = pow_ctx(&one_plus_r, exponent);
 
     let present_val = div_scale(&future_val, &divisor);
-    Ok(strip_plain(&present_val))
+    Response::ok(tool).result(strip_plain(&present_val)).build()
 }
 
 /// Future value of an ordinary annuity: `FV = PMT * ((1+r)^n - 1) / r`.
 pub fn future_value_annuity(payment: &str, annual_rate: &str, years: &str) -> String {
-    match compute_future_value_annuity(payment, annual_rate, years) {
-        Ok(s) => s,
-        Err(err) => format!("Error: {err}"),
+    let tool = TOOL_FUTURE_VALUE_ANNUITY;
+    let pmt = match parse_field(tool, "payment", payment) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let rate = match parse_field(tool, "annual_rate", annual_rate) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let years_dec = match parse_field(tool, "years", years) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = require_positive(tool, &pmt, "Payment") {
+        return e;
     }
-}
-
-fn compute_future_value_annuity(
-    payment: &str,
-    annual_rate: &str,
-    years: &str,
-) -> Result<String, String> {
-    let pmt = parse(payment, "payment")?;
-    let rate = parse(annual_rate, "annual rate")?;
-    let years_dec = parse(years, "years")?;
-
-    validate_positive(&pmt, "Payment")?;
-    validate_positive(&years_dec, "Years")?;
-
-    if rate.is_zero() {
-        let future_val = mul_ctx(&pmt, &years_dec);
-        return Ok(strip_plain(&future_val));
+    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+        return e;
+    }
+    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+        return e;
     }
 
-    let annual_rate_dec = div_scale(&rate, &hundred());
-    let exponent = int_value_exact(&years_dec, "Years")?;
-    let one_plus_r_pow_n = pow_ctx(&add_ctx(&one(), &annual_rate_dec), exponent);
-    let numerator = sub_ctx(&one_plus_r_pow_n, &one());
+    let future_val = if rate.is_zero() {
+        mul_ctx(&pmt, &years_dec)
+    } else {
+        let annual_rate_dec = div_scale(&rate, &hundred());
+        let exponent = match int_value_exact(tool, &years_dec, "Years") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let one_plus_r_pow_n = pow_ctx(&add_ctx(&one(), &annual_rate_dec), exponent);
+        let numerator = sub_ctx(&one_plus_r_pow_n, &one());
+        div_scale(&mul_ctx(&pmt, &numerator), &annual_rate_dec)
+    };
 
-    let future_val = div_scale(&mul_ctx(&pmt, &numerator), &annual_rate_dec);
-    Ok(strip_plain(&future_val))
+    Response::ok(tool).result(strip_plain(&future_val)).build()
 }
 
 /// Return on investment as a percentage: `ROI = (gain - cost) / cost * 100`.
 pub fn return_on_investment(gain: &str, cost: &str) -> String {
-    match compute_roi(gain, cost) {
-        Ok(s) => s,
-        Err(err) => format!("Error: {err}"),
-    }
-}
-
-fn compute_roi(gain: &str, cost: &str) -> Result<String, String> {
-    let gain_amount = parse(gain, "gain")?;
-    let cost_amount = parse(cost, "cost")?;
+    let tool = TOOL_RETURN_ON_INVESTMENT;
+    let gain_amount = match parse_field(tool, "gain", gain) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let cost_amount = match parse_field(tool, "cost", cost) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     if cost_amount.is_zero() {
-        return Err("Cost must not be zero".to_string());
+        return error(tool, ErrorCode::DivisionByZero, "cost must not be zero");
     }
 
     let diff = sub_ctx(&gain_amount, &cost_amount);
     let ratio = div_scale(&diff, &cost_amount);
     let roi = mul_ctx(&ratio, &hundred());
-    Ok(strip_plain(&roi))
+    Response::ok(tool).result(strip_plain(&roi)).build()
 }
 
-/// JSON row representing a single month in the amortization schedule.
-#[derive(Serialize)]
-struct AmortRow {
-    month: i64,
-    payment: String,
-    principal: String,
-    interest: String,
-    balance: String,
-}
-
-/// Generate a monthly amortization schedule as a JSON array.
+/// Generate a monthly amortization schedule as a block-formatted envelope.
 pub fn amortization_schedule(principal: &str, annual_rate: &str, years: &str) -> String {
-    match compute_amortization(principal, annual_rate, years) {
-        Ok(s) => s,
-        Err(err) => format!("Error: {err}"),
+    let tool = TOOL_AMORTIZATION_SCHEDULE;
+    let principal_amt = match parse_field(tool, "principal", principal) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let rate = match parse_field(tool, "annual_rate", annual_rate) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let years_dec = match parse_field(tool, "years", years) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = require_positive(tool, &principal_amt, "Principal") {
+        return e;
     }
-}
-
-fn compute_amortization(principal: &str, annual_rate: &str, years: &str) -> Result<String, String> {
-    let principal_amt = parse(principal, "principal")?;
-    let rate = parse(annual_rate, "annual rate")?;
-    let years_dec = parse(years, "years")?;
-
-    validate_positive(&principal_amt, "Principal")?;
-    validate_positive(&years_dec, "Years")?;
+    if let Err(e) = require_non_negative(tool, &rate, "Annual rate") {
+        return e;
+    }
+    if let Err(e) = require_positive(tool, &years_dec, "Years") {
+        return e;
+    }
 
     let months = mul_ctx(&years_dec, &BigDecimal::from(MONTHS_PER_YEAR));
-    let total_months = int_value_exact(&months, "Total months")?;
+    let total_months = match int_value_exact(tool, &months, "Total months") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let (monthly_rate, monthly_payment) = if rate.is_zero() {
         let payment = div_scale(&principal_amt, &BigDecimal::from(total_months));
@@ -313,7 +390,10 @@ fn compute_amortization(principal: &str, annual_rate: &str, years: &str) -> Resu
     };
 
     let mut balance = principal_amt.clone();
-    let mut rows: Vec<AmortRow> = Vec::with_capacity(total_months as usize);
+    let mut total_interest = BigDecimal::zero();
+    let mut total_paid = BigDecimal::zero();
+    let mut rows: Vec<(i64, String, String, String, String)> =
+        Vec::with_capacity(total_months as usize);
 
     for month in 1..=total_months {
         let interest =
@@ -331,16 +411,31 @@ fn compute_amortization(principal: &str, annual_rate: &str, years: &str) -> Resu
             (pmt_amount, principal_part)
         };
 
-        rows.push(AmortRow {
+        total_interest = &total_interest + &format_currency_value(&interest);
+        total_paid = &total_paid + &format_currency_value(&pmt_amount);
+
+        rows.push((
             month,
-            payment: format_currency(&pmt_amount),
-            principal: format_currency(&principal_part),
-            interest: format_currency(&interest),
-            balance: format_currency(&balance),
-        });
+            format_currency(&pmt_amount),
+            format_currency(&principal_part),
+            format_currency(&interest),
+            format_currency(&balance),
+        ));
     }
 
-    serde_json::to_string(&rows).map_err(|e| format!("JSON serialization failed: {e}"))
+    let mut builder = Response::ok(tool)
+        .field("MONTHLY_PAYMENT", format_currency(&monthly_payment))
+        .field("TOTAL_INTEREST", format_currency(&total_interest))
+        .field("TOTAL_PAID", format_currency(&total_paid))
+        .field("MONTHS", total_months.to_string());
+    for (month, payment, principal_part, interest, balance) in rows {
+        let key = format!("ROW_{month}");
+        let value = format!(
+            "month={month} | payment={payment} | principal={principal_part} | interest={interest} | balance={balance}"
+        );
+        builder = builder.field(key, value);
+    }
+    builder.block().build()
 }
 
 /// Format a `BigDecimal` as a 2-decimal currency string (HALF_UP).
@@ -350,6 +445,11 @@ fn format_currency(value: &BigDecimal) -> String {
         .to_plain_string()
 }
 
+/// Currency-rounded value kept as `BigDecimal` for exact summation.
+fn format_currency_value(value: &BigDecimal) -> BigDecimal {
+    value.with_scale_round(DISPLAY_SCALE, RoundingMode::HalfUp)
+}
+
 // --------------------------------------------------------------------------- //
 //  Tests
 // --------------------------------------------------------------------------- //
@@ -357,160 +457,207 @@ fn format_currency(value: &BigDecimal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     // ---- compound_interest ----
 
     #[test]
     fn compound_interest_annual() {
-        // $1000 at 5% annual, 10 years, compounded annually.
-        // Reference (Python decimal): 1000 * (1.05)^10 = 1628.894626777442
-        let out = compound_interest("1000", "5", "10", 1);
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 1628.894626777442).abs() < 1e-9, "got {out}");
+        assert_eq!(
+            compound_interest("1000", "5", "10", 1),
+            "COMPOUND_INTEREST: OK | RESULT: 1628.89462677744140625"
+        );
     }
 
     #[test]
     fn compound_interest_monthly() {
-        // $1000 at 6% APR, 2 years, compounded monthly.
-        // 1000 * (1 + 0.06/12)^24 ≈ 1127.15966...
-        let out = compound_interest("1000", "6", "2", 12);
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 1127.15966).abs() < 1e-3, "got {out}");
+        assert_eq!(
+            compound_interest("1000", "6", "2", 12),
+            "COMPOUND_INTEREST: OK | RESULT: 1127.15977620539174135356090964729"
+        );
     }
 
     #[test]
     fn compound_interest_zero_rate() {
-        let out = compound_interest("500", "0", "5", 4);
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 500.0).abs() < 1e-9, "got {out}");
+        assert_eq!(
+            compound_interest("500", "0", "5", 4),
+            "COMPOUND_INTEREST: OK | RESULT: 500"
+        );
     }
 
     #[test]
     fn compound_interest_negative_principal() {
-        let out = compound_interest("-100", "5", "1", 1);
-        assert_eq!(out, "Error: Principal must be greater than zero");
+        assert_eq!(
+            compound_interest("-100", "5", "1", 1),
+            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] Principal must be greater than zero\nDETAIL: principal=-100"
+        );
     }
 
     #[test]
     fn compound_interest_zero_compounds() {
-        let out = compound_interest("1000", "5", "1", 0);
-        assert_eq!(out, "Error: Compounds per year must be greater than zero");
+        assert_eq!(
+            compound_interest("1000", "5", "1", 0),
+            "COMPOUND_INTEREST: ERROR\nREASON: [INVALID_INPUT] Compounds per year must be greater than zero\nDETAIL: compounds_per_year=0"
+        );
+    }
+
+    #[test]
+    fn compound_interest_parse_error() {
+        assert_eq!(
+            compound_interest("abc", "5", "1", 1),
+            "COMPOUND_INTEREST: ERROR\nREASON: [PARSE_ERROR] operand is not a valid decimal number\nDETAIL: principal=abc"
+        );
     }
 
     // ---- loan_payment ----
 
     #[test]
     fn loan_payment_standard() {
-        // $100,000 at 6% APR over 30 years.
-        // Python decimal: monthly rate = 0.005; n = 360.
-        //   payment = 100000 * 0.005 * (1.005)^360 / ((1.005)^360 - 1)
-        //           ≈ 599.550548...
-        let out = loan_payment("100000", "6", "30");
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 599.550548).abs() < 1e-3, "got {out}");
+        assert_eq!(
+            loan_payment("100000", "6", "30"),
+            "LOAN_PAYMENT: OK | RESULT: 599.55052515275239459146"
+        );
     }
 
     #[test]
     fn loan_payment_zero_rate() {
-        // $1200, 0% interest, 1 year → $100/month
-        let out = loan_payment("1200", "0", "1");
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 100.0).abs() < 1e-9, "got {out}");
+        assert_eq!(
+            loan_payment("1200", "0", "1"),
+            "LOAN_PAYMENT: OK | RESULT: 100"
+        );
     }
 
     #[test]
     fn loan_payment_zero_principal() {
-        let out = loan_payment("0", "5", "10");
-        assert_eq!(out, "Error: Principal must be greater than zero");
+        assert_eq!(
+            loan_payment("0", "5", "10"),
+            "LOAN_PAYMENT: ERROR\nREASON: [INVALID_INPUT] Principal must be greater than zero\nDETAIL: principal=0"
+        );
+    }
+
+    #[test]
+    fn loan_payment_parse_error_principal() {
+        assert_eq!(
+            loan_payment("abc", "5", "10"),
+            "LOAN_PAYMENT: ERROR\nREASON: [PARSE_ERROR] operand is not a valid decimal number\nDETAIL: principal=abc"
+        );
     }
 
     // ---- present_value ----
 
     #[test]
     fn present_value_basic() {
-        // PV of $1000 in 5 years at 8% = 1000 / 1.08^5 ≈ 680.5832...
-        let out = present_value("1000", "8", "5");
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 680.58320).abs() < 1e-3, "got {out}");
+        assert_eq!(
+            present_value("1000", "8", "5"),
+            "PRESENT_VALUE: OK | RESULT: 680.58319703375316322003"
+        );
     }
 
     // ---- future_value_annuity ----
 
     #[test]
     fn future_value_annuity_basic() {
-        // $100/yr at 7% for 10 years: 100 * ((1.07^10 - 1)/0.07) ≈ 1381.644796...
-        let out = future_value_annuity("100", "7", "10");
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 1381.644796).abs() < 1e-3, "got {out}");
+        assert_eq!(
+            future_value_annuity("100", "7", "10"),
+            "FUTURE_VALUE_ANNUITY: OK | RESULT: 1381.6447961279504607"
+        );
     }
 
     #[test]
     fn future_value_annuity_zero_rate() {
-        // Zero rate: pmt * years. 200 * 5 = 1000.
-        let out = future_value_annuity("200", "0", "5");
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 1000.0).abs() < 1e-9, "got {out}");
+        assert_eq!(
+            future_value_annuity("200", "0", "5"),
+            "FUTURE_VALUE_ANNUITY: OK | RESULT: 1000"
+        );
     }
 
     // ---- return_on_investment ----
 
     #[test]
     fn roi_basic() {
-        // (150 - 100) / 100 * 100 = 50
-        let out = return_on_investment("150", "100");
-        let parsed: f64 = out.parse().unwrap();
-        assert!((parsed - 50.0).abs() < 1e-9, "got {out}");
+        assert_eq!(
+            return_on_investment("150", "100"),
+            "RETURN_ON_INVESTMENT: OK | RESULT: 50"
+        );
     }
 
     #[test]
     fn roi_zero_cost_error() {
-        let out = return_on_investment("100", "0");
-        assert_eq!(out, "Error: Cost must not be zero");
+        assert_eq!(
+            return_on_investment("100", "0"),
+            "RETURN_ON_INVESTMENT: ERROR\nREASON: [DIVISION_BY_ZERO] cost must not be zero"
+        );
+    }
+
+    #[test]
+    fn roi_parse_error_gain() {
+        assert_eq!(
+            return_on_investment("abc", "100"),
+            "RETURN_ON_INVESTMENT: ERROR\nREASON: [PARSE_ERROR] operand is not a valid decimal number\nDETAIL: gain=abc"
+        );
     }
 
     // ---- amortization_schedule ----
 
     #[test]
-    fn amortization_schedule_shape_and_first_month() {
-        // $10,000 at 6% APR over 1 year = 12 rows.
+    fn amortization_schedule_10k_6pct_1yr() {
         let out = amortization_schedule("10000", "6", "1");
-        let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
-        let arr = parsed.as_array().expect("is array");
-        assert_eq!(arr.len(), 12);
-
-        let first = &arr[0];
-        assert_eq!(first["month"].as_i64().unwrap(), 1);
-        // Monthly rate = 0.5% ; interest month 1 = 10000 * 0.005 = 50.00
-        assert_eq!(first["interest"].as_str().unwrap(), "50.00");
-
-        // payment ≈ 860.66 → principal = 860.66 - 50.00 ≈ 810.66
-        let interest: f64 = first["interest"].as_str().unwrap().parse().unwrap();
-        let principal: f64 = first["principal"].as_str().unwrap().parse().unwrap();
-        let payment: f64 = first["payment"].as_str().unwrap().parse().unwrap();
-        let balance: f64 = first["balance"].as_str().unwrap().parse().unwrap();
-        assert!((payment - (interest + principal)).abs() < 0.02);
-        assert!((balance - (10_000.0 - principal)).abs() < 0.02);
+        let expected = "AMORTIZATION_SCHEDULE: OK\n\
+MONTHLY_PAYMENT: 860.66\n\
+TOTAL_INTEREST: 327.96\n\
+TOTAL_PAID: 10327.92\n\
+MONTHS: 12\n\
+ROW_1: month=1 | payment=860.66 | principal=810.66 | interest=50.00 | balance=9189.34\n\
+ROW_2: month=2 | payment=860.66 | principal=814.72 | interest=45.95 | balance=8374.62\n\
+ROW_3: month=3 | payment=860.66 | principal=818.79 | interest=41.87 | balance=7555.83\n\
+ROW_4: month=4 | payment=860.66 | principal=822.89 | interest=37.78 | balance=6732.94\n\
+ROW_5: month=5 | payment=860.66 | principal=827.00 | interest=33.66 | balance=5905.94\n\
+ROW_6: month=6 | payment=860.66 | principal=831.13 | interest=29.53 | balance=5074.81\n\
+ROW_7: month=7 | payment=860.66 | principal=835.29 | interest=25.37 | balance=4239.52\n\
+ROW_8: month=8 | payment=860.66 | principal=839.47 | interest=21.20 | balance=3400.05\n\
+ROW_9: month=9 | payment=860.66 | principal=843.66 | interest=17.00 | balance=2556.39\n\
+ROW_10: month=10 | payment=860.66 | principal=847.88 | interest=12.78 | balance=1708.50\n\
+ROW_11: month=11 | payment=860.66 | principal=852.12 | interest=8.54 | balance=856.38\n\
+ROW_12: month=12 | payment=860.66 | principal=856.38 | interest=4.28 | balance=0.00";
+        assert_eq!(out, expected);
     }
 
     #[test]
     fn amortization_schedule_last_month_zero_balance() {
         let out = amortization_schedule("5000", "5", "1");
-        let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
-        let arr = parsed.as_array().unwrap();
-        let last = arr.last().unwrap();
-        assert_eq!(last["balance"].as_str().unwrap(), "0.00");
+        assert!(
+            out.contains("ROW_12: month=12 | payment=428.04 | principal=426.26 | interest=1.78 | balance=0.00"),
+            "got: {out}"
+        );
     }
 
     #[test]
     fn amortization_schedule_zero_rate() {
-        // Zero-rate: all interest = 0.00, equal principal per month.
         let out = amortization_schedule("1200", "0", "1");
-        let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
-        let arr = parsed.as_array().unwrap();
-        assert_eq!(arr.len(), 12);
-        for row in arr {
-            assert_eq!(row["interest"].as_str().unwrap(), "0.00");
-        }
+        let expected = "AMORTIZATION_SCHEDULE: OK\n\
+MONTHLY_PAYMENT: 100.00\n\
+TOTAL_INTEREST: 0.00\n\
+TOTAL_PAID: 1200.00\n\
+MONTHS: 12\n\
+ROW_1: month=1 | payment=100.00 | principal=100.00 | interest=0.00 | balance=1100.00\n\
+ROW_2: month=2 | payment=100.00 | principal=100.00 | interest=0.00 | balance=1000.00\n\
+ROW_3: month=3 | payment=100.00 | principal=100.00 | interest=0.00 | balance=900.00\n\
+ROW_4: month=4 | payment=100.00 | principal=100.00 | interest=0.00 | balance=800.00\n\
+ROW_5: month=5 | payment=100.00 | principal=100.00 | interest=0.00 | balance=700.00\n\
+ROW_6: month=6 | payment=100.00 | principal=100.00 | interest=0.00 | balance=600.00\n\
+ROW_7: month=7 | payment=100.00 | principal=100.00 | interest=0.00 | balance=500.00\n\
+ROW_8: month=8 | payment=100.00 | principal=100.00 | interest=0.00 | balance=400.00\n\
+ROW_9: month=9 | payment=100.00 | principal=100.00 | interest=0.00 | balance=300.00\n\
+ROW_10: month=10 | payment=100.00 | principal=100.00 | interest=0.00 | balance=200.00\n\
+ROW_11: month=11 | payment=100.00 | principal=100.00 | interest=0.00 | balance=100.00\n\
+ROW_12: month=12 | payment=100.00 | principal=100.00 | interest=0.00 | balance=0.00";
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn amortization_schedule_parse_error() {
+        assert_eq!(
+            amortization_schedule("abc", "5", "1"),
+            "AMORTIZATION_SCHEDULE: ERROR\nREASON: [PARSE_ERROR] operand is not a valid decimal number\nDETAIL: principal=abc"
+        );
     }
 }

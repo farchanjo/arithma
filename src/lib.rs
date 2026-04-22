@@ -3,5 +3,6 @@
 //! Public surface is intentionally narrow: the server binary consumes this crate.
 
 pub mod engine;
+pub mod mcp;
 pub mod server;
 pub mod tools;

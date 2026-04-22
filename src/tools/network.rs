@@ -1,9 +1,8 @@
-//! Port of `NetworkCalculatorTool.java` — subnet, IP conversion, VLSM,
-//! summarization, IPv6 compress/expand, and transfer-time / throughput helpers.
+//! Network tooling — subnet, IP conversion, VLSM, summarization, IPv6
+//! compress/expand, and transfer-time / throughput helpers.
 //!
-//! Every public function returns `String`. Failures are surfaced inline as
-//! `"Error: {message}"` messages whose text matches the Java source verbatim so
-//! downstream MCP clients observe identical output.
+//! Every public function returns `String`. Results use the response envelope
+//! from `crate::mcp::message` (inline by default, block for VLSM-style tables).
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -14,9 +13,28 @@ use num_traits::{One, Zero};
 
 use crate::engine::bigdecimal_ext::{DECIMAL128_PRECISION, strip_plain};
 use crate::engine::unit_registry::{UnitCategory, convert as convert_unit, find_unit};
+use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
 
 // ------------------------------------------------------------------ //
-//  Constants (mirror Java)
+//  Tool names
+// ------------------------------------------------------------------ //
+
+const SUBNET_CALCULATOR: &str = "SUBNET_CALCULATOR";
+const IP_TO_BINARY: &str = "IP_TO_BINARY";
+const BINARY_TO_IP: &str = "BINARY_TO_IP";
+const IP_TO_DECIMAL: &str = "IP_TO_DECIMAL";
+const DECIMAL_TO_IP: &str = "DECIMAL_TO_IP";
+const IP_IN_SUBNET: &str = "IP_IN_SUBNET";
+const VLSM_SUBNETS: &str = "VLSM_SUBNETS";
+const SUMMARIZE_SUBNETS: &str = "SUMMARIZE_SUBNETS";
+const EXPAND_IPV6: &str = "EXPAND_IPV6";
+const COMPRESS_IPV6: &str = "COMPRESS_IPV6";
+const TRANSFER_TIME: &str = "TRANSFER_TIME";
+const THROUGHPUT: &str = "THROUGHPUT";
+const TCP_THROUGHPUT: &str = "TCP_THROUGHPUT";
+
+// ------------------------------------------------------------------ //
+//  Constants
 // ------------------------------------------------------------------ //
 
 const IPV4_BITS: u32 = 32;
@@ -27,29 +45,8 @@ const CIDR_31: u32 = 31;
 const BITS_PER_BYTE: i64 = 8;
 const MIN_COMPRESS_LEN: usize = 2;
 const SCALE: i64 = 20;
-const ERROR_PREFIX: &str = "Error: ";
 const TRUE_STR: &str = "true";
 const FALSE_STR: &str = "false";
-
-// ------------------------------------------------------------------ //
-//  Error type
-// ------------------------------------------------------------------ //
-
-#[derive(Debug, thiserror::Error)]
-enum NetError {
-    #[error("{0}")]
-    Msg(String),
-}
-
-impl NetError {
-    fn new(msg: impl Into<String>) -> Self {
-        Self::Msg(msg.into())
-    }
-}
-
-fn err_str(e: NetError) -> String {
-    format!("{ERROR_PREFIX}{e}")
-}
 
 // ------------------------------------------------------------------ //
 //  Arithmetic helpers — DECIMAL128 precision + HALF_UP rounding
@@ -79,95 +76,152 @@ fn strip(value: &BigDecimal) -> String {
 //  Public API
 // ------------------------------------------------------------------ //
 
-/// Calculate subnet details. Returns JSON with network, broadcast, mask,
-/// wildcard, first/last host, usable hosts, and IP class.
+/// Calculate subnet details and return a single inline envelope describing
+/// the network, broadcast, mask, wildcard, first/last host, usable count and
+/// IP class.
 #[must_use]
 pub fn subnet_calculator(address: &str, cidr: i32) -> String {
-    let result = if is_ipv6(address) {
+    if is_ipv6(address) {
         subnet_v6(address, cidr)
     } else {
         subnet_v4(address, cidr)
-    };
-    unwrap_or_err(result)
+    }
 }
 
-/// Convert an IP to its binary representation.
+/// Convert an IP address to its binary representation.
 #[must_use]
 pub fn ip_to_binary(address: &str) -> String {
-    let result = if is_ipv6(address) {
+    if is_ipv6(address) {
         ipv6_to_binary(address)
     } else {
         ipv4_to_binary(address)
-    };
-    unwrap_or_err(result)
+    }
 }
 
 /// Convert a binary IP representation back to decimal notation.
 #[must_use]
 pub fn binary_to_ip(binary: &str) -> String {
-    let result = if binary.contains(':') {
+    if binary.contains(':') {
         binary_to_ipv6(binary)
     } else {
         binary_to_ipv4(binary)
-    };
-    unwrap_or_err(result)
+    }
 }
 
 /// Convert an IP address to its unsigned decimal integer representation.
 #[must_use]
 pub fn ip_to_decimal(address: &str) -> String {
-    let result = if is_ipv6(address) {
-        parse_ipv6(address).map(|v| v.to_string())
+    if is_ipv6(address) {
+        match parse_ipv6_for(IP_TO_DECIMAL, address) {
+            Ok(v) => Response::ok(IP_TO_DECIMAL).result(v.to_string()).build(),
+            Err(e) => e,
+        }
     } else {
-        parse_ipv4(address).map(|v| v.to_string())
-    };
-    unwrap_or_err(result)
+        match parse_ipv4_for(IP_TO_DECIMAL, address) {
+            Ok(v) => Response::ok(IP_TO_DECIMAL).result(v.to_string()).build(),
+            Err(e) => e,
+        }
+    }
 }
 
 /// Convert an unsigned decimal integer string to an IP address.
 #[must_use]
 pub fn decimal_to_ip(decimal: &str, version: i32) -> String {
-    unwrap_or_err(convert_decimal_to_ip(decimal, version))
+    if version == 6 {
+        match BigInt::from_str(decimal) {
+            Ok(big) => Response::ok(DECIMAL_TO_IP)
+                .result(big_int_to_ipv6_full(&big))
+                .build(),
+            Err(_) => error_with_detail(
+                DECIMAL_TO_IP,
+                ErrorCode::ParseError,
+                "decimal is not a valid integer",
+                &format!("decimal={decimal}"),
+            ),
+        }
+    } else if version == 4 {
+        let value = match decimal.parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => {
+                return error_with_detail(
+                    DECIMAL_TO_IP,
+                    ErrorCode::ParseError,
+                    "decimal is not a valid integer",
+                    &format!("decimal={decimal}"),
+                );
+            }
+        };
+        const IPV4_MAX: i64 = 0xFFFF_FFFF;
+        if !(0..=IPV4_MAX).contains(&value) {
+            return error_with_detail(
+                DECIMAL_TO_IP,
+                ErrorCode::OutOfRange,
+                "value does not fit in 32-bit unsigned range",
+                &format!("decimal={decimal}"),
+            );
+        }
+        Response::ok(DECIMAL_TO_IP)
+            .result(long_to_ipv4_str(value))
+            .build()
+    } else {
+        error_with_detail(
+            DECIMAL_TO_IP,
+            ErrorCode::InvalidInput,
+            "version must be 4 or 6",
+            &format!("version={version}"),
+        )
+    }
 }
 
-/// Whether an IP address is within the given subnet.
+/// Test whether an IP address is within the given subnet.
 #[must_use]
 pub fn ip_in_subnet(address: &str, network: &str, cidr: i32) -> String {
-    let result = if is_ipv6(address) {
+    let inside = if is_ipv6(address) {
         check_ipv6_in_subnet(address, network, cidr)
     } else {
         check_ipv4_in_subnet(address, network, cidr)
     };
-    unwrap_or_err(result)
+    match inside {
+        Ok(flag) => Response::ok(IP_IN_SUBNET).field("IN_SUBNET", flag).build(),
+        Err(e) => e,
+    }
 }
 
 /// VLSM subnet allocation. `host_counts_json` is a JSON array of host counts.
 #[must_use]
 pub fn vlsm_subnets(network_cidr: &str, host_counts_json: &str) -> String {
-    unwrap_or_err(compute_vlsm(network_cidr, host_counts_json))
+    compute_vlsm(network_cidr, host_counts_json)
 }
 
 /// Summarize (supernet) a list of subnets into a single CIDR block.
 #[must_use]
 pub fn summarize_subnets(subnets_json: &str) -> String {
-    unwrap_or_err(compute_summary(subnets_json))
+    compute_summary(subnets_json)
 }
 
 /// Expand a compressed IPv6 address to its full 8-group form.
 #[must_use]
 pub fn expand_ipv6(address: &str) -> String {
-    let result = parse_ipv6(address).map(|v| big_int_to_ipv6_full(&v));
-    unwrap_or_err(result)
+    match parse_ipv6_for(EXPAND_IPV6, address) {
+        Ok(v) => Response::ok(EXPAND_IPV6)
+            .result(big_int_to_ipv6_full(&v))
+            .build(),
+        Err(e) => e,
+    }
 }
 
 /// Compress an IPv6 address to its shortest canonical form using `::`.
 #[must_use]
 pub fn compress_ipv6(address: &str) -> String {
-    let result = parse_ipv6(address).map(|v| compress_ipv6_groups(&big_int_to_ipv6_full(&v)));
-    unwrap_or_err(result)
+    match parse_ipv6_for(COMPRESS_IPV6, address) {
+        Ok(v) => Response::ok(COMPRESS_IPV6)
+            .result(compress_ipv6_groups(&big_int_to_ipv6_full(&v)))
+            .build(),
+        Err(e) => e,
+    }
 }
 
-/// Estimate file transfer time. Returns JSON with seconds, minutes, hours.
+/// Estimate file transfer time at a given bandwidth.
 #[must_use]
 pub fn transfer_time(
     file_size: &str,
@@ -175,15 +229,10 @@ pub fn transfer_time(
     bandwidth: &str,
     bandwidth_unit: &str,
 ) -> String {
-    unwrap_or_err(compute_transfer_time(
-        file_size,
-        file_size_unit,
-        bandwidth,
-        bandwidth_unit,
-    ))
+    compute_transfer_time(file_size, file_size_unit, bandwidth, bandwidth_unit)
 }
 
-/// Calculate data throughput given data size and time.
+/// Calculate data throughput given a payload size and an elapsed time.
 #[must_use]
 pub fn throughput(
     data_size: &str,
@@ -192,95 +241,68 @@ pub fn throughput(
     time_unit: &str,
     output_unit: &str,
 ) -> String {
-    unwrap_or_err(compute_throughput(
-        data_size,
-        data_size_unit,
-        time,
-        time_unit,
-        output_unit,
-    ))
+    compute_throughput(data_size, data_size_unit, time, time_unit, output_unit)
 }
 
-/// Effective TCP throughput via bandwidth-delay product. Returns Mbps.
+/// Effective TCP throughput via bandwidth-delay product (Mbps).
 #[must_use]
 pub fn tcp_throughput(bandwidth_mbps: &str, rtt_ms: &str, window_size_kb: &str) -> String {
-    unwrap_or_err(compute_tcp_throughput(
-        bandwidth_mbps,
-        rtt_ms,
-        window_size_kb,
-    ))
-}
-
-// ------------------------------------------------------------------ //
-//  Result adapter
-// ------------------------------------------------------------------ //
-
-fn unwrap_or_err(result: Result<String, NetError>) -> String {
-    match result {
-        Ok(value) => value,
-        Err(e) => err_str(e),
-    }
-}
-
-// ------------------------------------------------------------------ //
-//  Decimal-to-IP dispatch
-// ------------------------------------------------------------------ //
-
-fn convert_decimal_to_ip(decimal: &str, version: i32) -> Result<String, NetError> {
-    if version == 6 {
-        let big = BigInt::from_str(decimal)
-            .map_err(|_| NetError::new(format!("Invalid decimal: {decimal}")))?;
-        Ok(big_int_to_ipv6_full(&big))
-    } else if version == 4 {
-        let val = decimal
-            .parse::<i64>()
-            .map_err(|_| NetError::new(format!("Invalid decimal: {decimal}")))?;
-        long_to_ipv4(val)
-    } else {
-        Err(NetError::new("Version must be 4 or 6"))
-    }
+    compute_tcp_throughput(bandwidth_mbps, rtt_ms, window_size_kb)
 }
 
 // ------------------------------------------------------------------ //
 //  IPv4 helpers
 // ------------------------------------------------------------------ //
 
-fn parse_ipv4(address: &str) -> Result<i64, NetError> {
-    // Match Java behavior: reject anything that isn't exactly 4 decimal octets
-    // in range 0..=255. `Ipv4Addr::from_str` accepts the same set.
+fn parse_ipv4_for(tool: &str, address: &str) -> Result<i64, String> {
     let parts: Vec<&str> = address.split('.').collect();
     if parts.len() != OCTET_COUNT {
-        return Err(NetError::new(format!("Invalid IPv4 address: {address}")));
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            "address is not a valid IPv4 address",
+            &format!("address={address}"),
+        ));
     }
     let mut value: i64 = 0;
     for part in &parts {
-        let octet: i32 = part
-            .parse()
-            .map_err(|_| NetError::new(format!("Invalid IPv4 address: {address}")))?;
+        let octet: i32 = part.parse().map_err(|_| {
+            error_with_detail(
+                tool,
+                ErrorCode::ParseError,
+                "address is not a valid IPv4 address",
+                &format!("address={address}"),
+            )
+        })?;
         if !(0..=255).contains(&octet) {
-            return Err(NetError::new(format!("Octet out of range: {octet}")));
+            return Err(error_with_detail(
+                tool,
+                ErrorCode::OutOfRange,
+                "IPv4 octet must be in 0..=255",
+                &format!("address={address}"),
+            ));
         }
         value = (value << 8) | i64::from(octet);
     }
-    // Sanity-check against std parser to keep parity with Java's Integer.parseInt strictness.
     if Ipv4Addr::from_str(address).is_err() {
-        return Err(NetError::new(format!("Invalid IPv4 address: {address}")));
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            "address is not a valid IPv4 address",
+            &format!("address={address}"),
+        ));
     }
     Ok(value)
 }
 
-fn long_to_ipv4(value: i64) -> Result<String, NetError> {
-    const IPV4_MAX: i64 = 0xFFFF_FFFF;
-    if !(0..=IPV4_MAX).contains(&value) {
-        return Err(NetError::new(format!("Value out of IPv4 range: {value}")));
-    }
-    Ok(format!(
+fn long_to_ipv4_str(value: i64) -> String {
+    format!(
         "{}.{}.{}.{}",
         (value >> 24) & 0xFF,
         (value >> 16) & 0xFF,
         (value >> 8) & 0xFF,
         value & 0xFF
-    ))
+    )
 }
 
 fn cidr_to_mask_v4(cidr: u32) -> i64 {
@@ -314,16 +336,20 @@ fn is_ipv6(address: &str) -> bool {
     address.contains(':')
 }
 
-fn parse_ipv6(address: &str) -> Result<BigInt, NetError> {
-    // Use std to validate + extract the 128-bit integer.
-    let parsed = Ipv6Addr::from_str(address)
-        .map_err(|_| NetError::new(format!("Invalid IPv6 address: {address}")))?;
+fn parse_ipv6_for(tool: &str, address: &str) -> Result<BigInt, String> {
+    let parsed = Ipv6Addr::from_str(address).map_err(|_| {
+        error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            "address is not a valid IPv6 address",
+            &format!("address={address}"),
+        )
+    })?;
     let bits: u128 = parsed.to_bits();
     Ok(BigInt::from(bits))
 }
 
 fn big_int_to_ipv6_full(value: &BigInt) -> String {
-    // Render as 32 hex digits, padded, then split into 8 groups of 4.
     let (_, mag) = value.to_bytes_be();
     let mut raw = String::with_capacity(32);
     for byte in &mag {
@@ -375,10 +401,15 @@ fn to_binary16(group: u32) -> String {
 //  Validation
 // ------------------------------------------------------------------ //
 
-fn validate_cidr(cidr: i32, ipv6: bool) -> Result<u32, NetError> {
+fn validate_cidr_for(tool: &str, cidr: i32, ipv6: bool) -> Result<u32, String> {
     let max: i32 = if ipv6 { 128 } else { 32 };
     if cidr < 0 || cidr > max {
-        return Err(NetError::new(format!("CIDR must be 0-{max}, got {cidr}")));
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::OutOfRange,
+            &format!("CIDR must be between 0 and {max}"),
+            &format!("cidr={cidr}"),
+        ));
     }
     Ok(cidr as u32)
 }
@@ -387,27 +418,27 @@ fn validate_cidr(cidr: i32, ipv6: bool) -> Result<u32, NetError> {
 //  IP-in-subnet checks
 // ------------------------------------------------------------------ //
 
-fn check_ipv6_in_subnet(address: &str, network: &str, cidr: i32) -> Result<String, NetError> {
-    let cidr = validate_cidr(cidr, true)?;
-    let ip_val = parse_ipv6(address)?;
-    let net_val = parse_ipv6(network)?;
+fn check_ipv6_in_subnet(address: &str, network: &str, cidr: i32) -> Result<&'static str, String> {
+    let cidr = validate_cidr_for(IP_IN_SUBNET, cidr, true)?;
+    let ip_val = parse_ipv6_for(IP_IN_SUBNET, address)?;
+    let net_val = parse_ipv6_for(IP_IN_SUBNET, network)?;
     let mask = cidr_to_mask_v6(cidr);
     Ok(if (&ip_val & &mask) == (&net_val & &mask) {
-        TRUE_STR.to_string()
+        TRUE_STR
     } else {
-        FALSE_STR.to_string()
+        FALSE_STR
     })
 }
 
-fn check_ipv4_in_subnet(address: &str, network: &str, cidr: i32) -> Result<String, NetError> {
-    let cidr = validate_cidr(cidr, false)?;
-    let ip_val = parse_ipv4(address)?;
-    let net_val = parse_ipv4(network)?;
+fn check_ipv4_in_subnet(address: &str, network: &str, cidr: i32) -> Result<&'static str, String> {
+    let cidr = validate_cidr_for(IP_IN_SUBNET, cidr, false)?;
+    let ip_val = parse_ipv4_for(IP_IN_SUBNET, address)?;
+    let net_val = parse_ipv4_for(IP_IN_SUBNET, network)?;
     let mask = cidr_to_mask_v4(cidr);
     Ok(if (ip_val & mask) == (net_val & mask) {
-        TRUE_STR.to_string()
+        TRUE_STR
     } else {
-        FALSE_STR.to_string()
+        FALSE_STR
     })
 }
 
@@ -415,24 +446,19 @@ fn check_ipv4_in_subnet(address: &str, network: &str, cidr: i32) -> Result<Strin
 //  Subnet calculation (v4)
 // ------------------------------------------------------------------ //
 
-fn subnet_v4(address: &str, cidr: i32) -> Result<String, NetError> {
-    let cidr = validate_cidr(cidr, false)?;
-    let ip_val = parse_ipv4(address)?;
+fn subnet_v4(address: &str, cidr: i32) -> String {
+    let cidr = match validate_cidr_for(SUBNET_CALCULATOR, cidr, false) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let ip_val = match parse_ipv4_for(SUBNET_CALCULATOR, address) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let mask = cidr_to_mask_v4(cidr);
     let network = ip_val & mask;
     let wildcard = !mask & 0xFFFF_FFFF_i64;
     let broadcast = network | wildcard;
-    build_subnet_v4_json(network, broadcast, mask, wildcard, cidr, ip_val)
-}
-
-fn build_subnet_v4_json(
-    network: i64,
-    broadcast: i64,
-    mask: i64,
-    wildcard: i64,
-    cidr: u32,
-    ip_value: i64,
-) -> Result<String, NetError> {
     let (first_host, last_host, usable_hosts) = if cidr == IPV4_BITS {
         (network, network, 0_i64)
     } else if cidr == CIDR_31 {
@@ -440,115 +466,164 @@ fn build_subnet_v4_json(
     } else {
         (network + 1, broadcast - 1, broadcast - network - 1)
     };
-    Ok(format!(
-        "{{\"network\":\"{}\",\"broadcast\":\"{}\",\"mask\":\"{}\",\"wildcard\":\"{}\",\"firstHost\":\"{}\",\"lastHost\":\"{}\",\"usableHosts\":{},\"ipClass\":\"{}\"}}",
-        long_to_ipv4(network)?,
-        long_to_ipv4(broadcast)?,
-        long_to_ipv4(mask)?,
-        long_to_ipv4(wildcard)?,
-        long_to_ipv4(first_host)?,
-        long_to_ipv4(last_host)?,
-        usable_hosts,
-        ip_class(ip_value)
-    ))
+    Response::ok(SUBNET_CALCULATOR)
+        .field("NETWORK", long_to_ipv4_str(network))
+        .field("BROADCAST", long_to_ipv4_str(broadcast))
+        .field("MASK", long_to_ipv4_str(mask))
+        .field("WILDCARD", long_to_ipv4_str(wildcard))
+        .field("FIRST_HOST", long_to_ipv4_str(first_host))
+        .field("LAST_HOST", long_to_ipv4_str(last_host))
+        .field("USABLE_HOSTS", usable_hosts.to_string())
+        .field("IP_CLASS", ip_class(ip_val))
+        .build()
 }
 
 // ------------------------------------------------------------------ //
 //  Subnet calculation (v6)
 // ------------------------------------------------------------------ //
 
-fn subnet_v6(address: &str, cidr: i32) -> Result<String, NetError> {
-    let cidr = validate_cidr(cidr, true)?;
-    let ip_val = parse_ipv6(address)?;
+fn subnet_v6(address: &str, cidr: i32) -> String {
+    let cidr = match validate_cidr_for(SUBNET_CALCULATOR, cidr, true) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let ip_val = match parse_ipv6_for(SUBNET_CALCULATOR, address) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let mask = cidr_to_mask_v6(cidr);
     let network = &ip_val & &mask;
     let host_bits = IPV6_BITS - cidr;
-    Ok(build_subnet_v6_json(&network, &mask, host_bits))
-}
-
-fn build_subnet_v6_json(network: &BigInt, mask: &BigInt, host_bits: u32) -> String {
     let host_range = if host_bits == 0 {
         BigInt::zero()
     } else {
         (BigInt::one() << host_bits) - BigInt::one()
     };
-    let last = network | &host_range;
+    let last = &network | &host_range;
     let (first_host, last_host, usable_hosts) = if host_bits == 0 {
         (network.clone(), network.clone(), BigInt::zero())
     } else if host_bits == 1 {
         (network.clone(), last.clone(), BigInt::from(2u32))
     } else {
         (
-            network + BigInt::one(),
+            &network + BigInt::one(),
             &last - BigInt::one(),
             &host_range - BigInt::one(),
         )
     };
-    format!(
-        "{{\"network\":\"{}\",\"mask\":\"{}\",\"firstHost\":\"{}\",\"lastHost\":\"{}\",\"usableHosts\":{}}}",
-        big_int_to_ipv6_full(network),
-        big_int_to_ipv6_full(mask),
-        big_int_to_ipv6_full(&first_host),
-        big_int_to_ipv6_full(&last_host),
-        usable_hosts
-    )
+    Response::ok(SUBNET_CALCULATOR)
+        .field("NETWORK", big_int_to_ipv6_full(&network))
+        .field("MASK", big_int_to_ipv6_full(&mask))
+        .field("FIRST_HOST", big_int_to_ipv6_full(&first_host))
+        .field("LAST_HOST", big_int_to_ipv6_full(&last_host))
+        .field("USABLE_HOSTS", usable_hosts.to_string())
+        .build()
 }
 
 // ------------------------------------------------------------------ //
-//  Binary conversion methods
+//  Binary conversion
 // ------------------------------------------------------------------ //
 
-fn ipv4_to_binary(address: &str) -> Result<String, NetError> {
-    let value = parse_ipv4(address)?;
-    Ok(format!(
+fn ipv4_to_binary(address: &str) -> String {
+    let value = match parse_ipv4_for(IP_TO_BINARY, address) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let bin = format!(
         "{}.{}.{}.{}",
         to_binary8(((value >> 24) & 0xFF) as u32),
         to_binary8(((value >> 16) & 0xFF) as u32),
         to_binary8(((value >> 8) & 0xFF) as u32),
         to_binary8((value & 0xFF) as u32)
-    ))
+    );
+    Response::ok(IP_TO_BINARY).result(bin).build()
 }
 
-fn ipv6_to_binary(address: &str) -> Result<String, NetError> {
-    let full = big_int_to_ipv6_full(&parse_ipv6(address)?);
+fn ipv6_to_binary(address: &str) -> String {
+    let value = match parse_ipv6_for(IP_TO_BINARY, address) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let full = big_int_to_ipv6_full(&value);
     let mut out = String::with_capacity(143);
     for (idx, group) in full.split(':').enumerate() {
         if idx > 0 {
             out.push(':');
         }
-        let parsed = u32::from_str_radix(group, 16)
-            .map_err(|_| NetError::new(format!("Invalid IPv6 address: {address}")))?;
+        let parsed = match u32::from_str_radix(group, 16) {
+            Ok(v) => v,
+            Err(_) => {
+                return error_with_detail(
+                    IP_TO_BINARY,
+                    ErrorCode::ParseError,
+                    "address is not a valid IPv6 address",
+                    &format!("address={address}"),
+                );
+            }
+        };
         out.push_str(&to_binary16(parsed));
     }
-    Ok(out)
+    Response::ok(IP_TO_BINARY).result(out).build()
 }
 
-fn binary_to_ipv4(binary: &str) -> Result<String, NetError> {
+fn binary_to_ipv4(binary: &str) -> String {
     let parts: Vec<&str> = binary.split('.').collect();
     if parts.len() != OCTET_COUNT {
-        return Err(NetError::new("Expected 4 dot-separated 8-bit groups"));
+        return error_with_detail(
+            BINARY_TO_IP,
+            ErrorCode::InvalidInput,
+            "expected 4 dot-separated 8-bit groups",
+            &format!("binary={binary}"),
+        );
     }
     let mut value: i64 = 0;
     for part in &parts {
-        let group = i64::from_str_radix(part, 2)
-            .map_err(|_| NetError::new("Expected 4 dot-separated 8-bit groups"))?;
+        let group = match i64::from_str_radix(part, 2) {
+            Ok(v) => v,
+            Err(_) => {
+                return error_with_detail(
+                    BINARY_TO_IP,
+                    ErrorCode::ParseError,
+                    "expected 4 dot-separated 8-bit groups",
+                    &format!("binary={binary}"),
+                );
+            }
+        };
         value = (value << 8) | group;
     }
-    long_to_ipv4(value)
+    Response::ok(BINARY_TO_IP)
+        .result(long_to_ipv4_str(value))
+        .build()
 }
 
-fn binary_to_ipv6(binary: &str) -> Result<String, NetError> {
+fn binary_to_ipv6(binary: &str) -> String {
     let parts: Vec<&str> = binary.split(':').collect();
     if parts.len() != IPV6_GROUP_COUNT {
-        return Err(NetError::new("Expected 8 colon-separated 16-bit groups"));
+        return error_with_detail(
+            BINARY_TO_IP,
+            ErrorCode::InvalidInput,
+            "expected 8 colon-separated 16-bit groups",
+            &format!("binary={binary}"),
+        );
     }
     let mut value = BigInt::zero();
     for part in &parts {
-        let group = u32::from_str_radix(part, 2)
-            .map_err(|_| NetError::new("Expected 8 colon-separated 16-bit groups"))?;
+        let group = match u32::from_str_radix(part, 2) {
+            Ok(v) => v,
+            Err(_) => {
+                return error_with_detail(
+                    BINARY_TO_IP,
+                    ErrorCode::ParseError,
+                    "expected 8 colon-separated 16-bit groups",
+                    &format!("binary={binary}"),
+                );
+            }
+        };
         value = (value << 16) | BigInt::from(group);
     }
-    Ok(big_int_to_ipv6_full(&value))
+    Response::ok(BINARY_TO_IP)
+        .result(big_int_to_ipv6_full(&value))
+        .build()
 }
 
 // ------------------------------------------------------------------ //
@@ -609,7 +684,6 @@ fn join_trimmed(groups: &[&str], from: usize, end: usize) -> String {
 }
 
 fn trim_leading_zeros(group: &str) -> String {
-    // Match Java's `^0+(?!$)` — strip leading zeros unless the group is all zeros.
     let trimmed = group.trim_start_matches('0');
     if trimmed.is_empty() {
         "0".to_string()
@@ -622,77 +696,82 @@ fn trim_leading_zeros(group: &str) -> String {
 //  VLSM
 // ------------------------------------------------------------------ //
 
-fn compute_vlsm(network_cidr: &str, host_counts_json: &str) -> Result<String, NetError> {
+fn compute_vlsm(network_cidr: &str, host_counts_json: &str) -> String {
     let cidr_parts: Vec<&str> = network_cidr.split('/').collect();
     if cidr_parts.len() != 2 {
-        return Err(NetError::new(format!(
-            "Invalid IPv4 address: {network_cidr}"
-        )));
+        return error_with_detail(
+            VLSM_SUBNETS,
+            ErrorCode::ParseError,
+            "expected network/prefix form",
+            &format!("cidr={network_cidr}"),
+        );
     }
-    let base_network = parse_ipv4(cidr_parts[0])?;
-    let base_cidr: i32 = cidr_parts[1]
-        .parse()
-        .map_err(|_| NetError::new(format!("CIDR must be 0-32, got {}", cidr_parts[1])))?;
-    let base_cidr_u = validate_cidr(base_cidr, false)?;
+    let base_network = match parse_ipv4_for(VLSM_SUBNETS, cidr_parts[0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let base_cidr: i32 = match cidr_parts[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return error_with_detail(
+                VLSM_SUBNETS,
+                ErrorCode::ParseError,
+                "prefix is not a valid integer",
+                &format!("cidr={}", cidr_parts[1]),
+            );
+        }
+    };
+    let base_cidr_u = match validate_cidr_for(VLSM_SUBNETS, base_cidr, false) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let base_mask = cidr_to_mask_v4(base_cidr_u);
     let base_end = base_network | (!base_mask & 0xFFFF_FFFF_i64);
 
-    let mut counts = parse_int_array(host_counts_json)?;
+    let mut counts = match parse_int_array(VLSM_SUBNETS, host_counts_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     counts.sort_by(|a, b| b.cmp(a));
 
     let mut pointer = base_network;
-    let mut out = String::from("[");
+    let mut response = Response::ok(VLSM_SUBNETS)
+        .field("COUNT", counts.len().to_string())
+        .block();
 
     for (idx, &needed) in counts.iter().enumerate() {
         let host_bits = ceil_log2(needed + 2);
         let subnet_cidr_i = IPV4_BITS as i32 - host_bits;
-        validate_vlsm_fit(needed, subnet_cidr_i, base_cidr)?;
+        if subnet_cidr_i < base_cidr {
+            return error_with_detail(
+                VLSM_SUBNETS,
+                ErrorCode::InvalidInput,
+                &format!("cannot fit {needed} hosts in /{base_cidr}"),
+                &format!("hosts={needed}"),
+            );
+        }
         let subnet_cidr = subnet_cidr_i as u32;
 
         let sub_mask = cidr_to_mask_v4(subnet_cidr);
         let sub_broadcast = pointer | (!sub_mask & 0xFFFF_FFFF_i64);
         if sub_broadcast > base_end {
-            return Err(NetError::new("Address space exhausted"));
+            return error(
+                VLSM_SUBNETS,
+                ErrorCode::InvalidInput,
+                "address space exhausted",
+            );
         }
-
-        if idx > 0 {
-            out.push(',');
-        }
-        append_vlsm_entry(&mut out, pointer, subnet_cidr, sub_broadcast)?;
+        let row_label = format!("ROW_{}", idx + 1);
+        let usable = sub_broadcast - pointer - 1;
+        let row_value = format!(
+            "hosts={needed} | cidr={subnet_cidr} | network={} | broadcast={} | usable={usable}",
+            long_to_ipv4_str(pointer),
+            long_to_ipv4_str(sub_broadcast),
+        );
+        response = response.field(row_label, row_value);
         pointer = sub_broadcast + 1;
     }
-    out.push(']');
-    Ok(out)
-}
-
-fn validate_vlsm_fit(needed: i32, subnet_cidr: i32, base_cidr: i32) -> Result<(), NetError> {
-    if subnet_cidr < base_cidr {
-        return Err(NetError::new(format!(
-            "Cannot fit {needed} hosts in /{base_cidr}"
-        )));
-    }
-    Ok(())
-}
-
-fn append_vlsm_entry(
-    out: &mut String,
-    network: i64,
-    cidr: u32,
-    broadcast: i64,
-) -> Result<(), NetError> {
-    let usable = broadcast - network - 1;
-    out.push_str("{\"network\":\"");
-    out.push_str(&long_to_ipv4(network)?);
-    out.push_str("\",\"cidr\":");
-    out.push_str(&cidr.to_string());
-    out.push_str(",\"firstHost\":\"");
-    out.push_str(&long_to_ipv4(network + 1)?);
-    out.push_str("\",\"lastHost\":\"");
-    out.push_str(&long_to_ipv4(broadcast - 1)?);
-    out.push_str("\",\"usableHosts\":");
-    out.push_str(&usable.to_string());
-    out.push('}');
-    Ok(())
+    response.build()
 }
 
 fn ceil_log2(value: i32) -> i32 {
@@ -709,23 +788,49 @@ fn ceil_log2(value: i32) -> i32 {
 //  Summarize subnets
 // ------------------------------------------------------------------ //
 
-fn compute_summary(subnets_json: &str) -> Result<String, NetError> {
-    let cidr_list = parse_string_array(subnets_json)?;
+fn compute_summary(subnets_json: &str) -> String {
+    let cidr_list = match parse_string_array(SUMMARIZE_SUBNETS, subnets_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     if cidr_list.is_empty() {
-        return Err(NetError::new("Empty subnet list"));
+        return error(
+            SUMMARIZE_SUBNETS,
+            ErrorCode::InvalidInput,
+            "subnet list must not be empty",
+        );
     }
     let mut min_network: i64 = 0xFFFF_FFFF;
     let mut max_broadcast: i64 = 0;
     for cidr in &cidr_list {
         let parts: Vec<&str> = cidr.split('/').collect();
         if parts.len() != 2 {
-            return Err(NetError::new(format!("Invalid IPv4 address: {cidr}")));
+            return error_with_detail(
+                SUMMARIZE_SUBNETS,
+                ErrorCode::ParseError,
+                "expected network/prefix form",
+                &format!("cidr={cidr}"),
+            );
         }
-        let network = parse_ipv4(parts[0])?;
-        let prefix: i32 = parts[1]
-            .parse()
-            .map_err(|_| NetError::new(format!("CIDR must be 0-32, got {}", parts[1])))?;
-        let prefix_u = validate_cidr(prefix, false)?;
+        let network = match parse_ipv4_for(SUMMARIZE_SUBNETS, parts[0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let prefix: i32 = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                return error_with_detail(
+                    SUMMARIZE_SUBNETS,
+                    ErrorCode::ParseError,
+                    "prefix is not a valid integer",
+                    &format!("cidr={}", parts[1]),
+                );
+            }
+        };
+        let prefix_u = match validate_cidr_for(SUMMARIZE_SUBNETS, prefix, false) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
         let mask = cidr_to_mask_v4(prefix_u);
         let broadcast = network | (!mask & 0xFFFF_FFFF_i64);
         if network < min_network {
@@ -740,33 +845,60 @@ fn compute_summary(subnets_json: &str) -> Result<String, NetError> {
     let super_cidr = IPV4_BITS as i32 - super_bits;
     let super_mask = cidr_to_mask_v4(super_cidr as u32);
     let super_network = min_network & super_mask;
-    Ok(format!("{}/{}", long_to_ipv4(super_network)?, super_cidr))
+    let summary = format!("{}/{}", long_to_ipv4_str(super_network), super_cidr);
+    Response::ok(SUMMARIZE_SUBNETS).result(summary).build()
 }
 
 // ------------------------------------------------------------------ //
 //  Transfer time / throughput
 // ------------------------------------------------------------------ //
 
-fn require_category(code: &str, category: UnitCategory, label: &str) -> Result<(), NetError> {
+fn require_category_for(
+    tool: &str,
+    code: &str,
+    category: UnitCategory,
+    label: &str,
+) -> Result<(), String> {
     match find_unit(code) {
         Some(unit) if unit.category == category => Ok(()),
-        Some(unit) => Err(NetError::new(format!(
-            "Unit '{}' is not in category {} (expected for {})",
-            unit.code,
-            category.as_str(),
-            label
-        ))),
-        None => Err(NetError::new(format!("Unknown unit: {code}"))),
+        Some(unit) => Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            &format!(
+                "unit '{}' is not in category {} (expected for {})",
+                unit.code,
+                category.as_str(),
+                label
+            ),
+            &format!("{label}={code}"),
+        )),
+        None => Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            "unknown unit",
+            &format!("{label}={code}"),
+        )),
     }
 }
 
-fn unit_convert(value: &BigDecimal, from: &str, to: &str) -> Result<BigDecimal, NetError> {
-    convert_unit(value, from, to).map_err(|e| NetError::new(e.to_string()))
+fn unit_convert_for(
+    tool: &str,
+    value: &BigDecimal,
+    from: &str,
+    to: &str,
+) -> Result<BigDecimal, String> {
+    convert_unit(value, from, to).map_err(|e| error(tool, ErrorCode::InvalidInput, &e.to_string()))
 }
 
-fn parse_decimal(input: &str, label: &str) -> Result<BigDecimal, NetError> {
-    BigDecimal::from_str(input)
-        .map_err(|_| NetError::new(format!("Invalid {label} value: {input}")))
+fn parse_decimal_for(tool: &str, input: &str, label: &str) -> Result<BigDecimal, String> {
+    BigDecimal::from_str(input).map_err(|_| {
+        error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            &format!("{label} is not a valid decimal number"),
+            &format!("{label}={input}"),
+        )
+    })
 }
 
 fn compute_transfer_time(
@@ -774,29 +906,61 @@ fn compute_transfer_time(
     file_size_unit: &str,
     bandwidth: &str,
     bandwidth_unit: &str,
-) -> Result<String, NetError> {
+) -> String {
     let size_unit = file_size_unit.to_ascii_lowercase();
     let bw_unit = bandwidth_unit.to_ascii_lowercase();
-    require_category(&size_unit, UnitCategory::DataStorage, "fileSizeUnit")?;
-    require_category(&bw_unit, UnitCategory::DataRate, "bandwidthUnit")?;
+    if let Err(e) = require_category_for(
+        TRANSFER_TIME,
+        &size_unit,
+        UnitCategory::DataStorage,
+        "fileSizeUnit",
+    ) {
+        return e;
+    }
+    if let Err(e) = require_category_for(
+        TRANSFER_TIME,
+        &bw_unit,
+        UnitCategory::DataRate,
+        "bandwidthUnit",
+    ) {
+        return e;
+    }
 
-    let size_value = parse_decimal(file_size, "fileSize")?;
-    let bandwidth_value = parse_decimal(bandwidth, "bandwidth")?;
+    let size_value = match parse_decimal_for(TRANSFER_TIME, file_size, "fileSize") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let bandwidth_value = match parse_decimal_for(TRANSFER_TIME, bandwidth, "bandwidth") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
-    let size_bytes = unit_convert(&size_value, &size_unit, "byte")?;
+    let size_bytes = match unit_convert_for(TRANSFER_TIME, &size_value, &size_unit, "byte") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let size_bits = mul_ctx(&size_bytes, &BigDecimal::from(BITS_PER_BYTE));
-    let bps = unit_convert(&bandwidth_value, &bw_unit, "bps")?;
+    let bps = match unit_convert_for(TRANSFER_TIME, &bandwidth_value, &bw_unit, "bps") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if bps.is_zero() {
+        return error(
+            TRANSFER_TIME,
+            ErrorCode::DivisionByZero,
+            "bandwidth must be greater than zero",
+        );
+    }
 
     let seconds = div_scaled(&size_bits, &bps);
     let minutes = div_scaled(&seconds, &BigDecimal::from(60));
     let hours = div_scaled(&seconds, &BigDecimal::from(3600));
 
-    Ok(format!(
-        "{{\"seconds\":\"{}\",\"minutes\":\"{}\",\"hours\":\"{}\"}}",
-        strip(&seconds),
-        strip(&minutes),
-        strip(&hours)
-    ))
+    Response::ok(TRANSFER_TIME)
+        .field("SECONDS", strip(&seconds))
+        .field("MINUTES", strip(&minutes))
+        .field("HOURS", strip(&hours))
+        .build()
 }
 
 fn compute_throughput(
@@ -805,40 +969,91 @@ fn compute_throughput(
     time: &str,
     time_unit: &str,
     output_unit: &str,
-) -> Result<String, NetError> {
+) -> String {
     let size_unit = data_size_unit.to_ascii_lowercase();
     let tu = time_unit.to_ascii_lowercase();
     let out_unit = output_unit.to_ascii_lowercase();
 
-    require_category(&size_unit, UnitCategory::DataStorage, "dataSizeUnit")?;
-    require_category(&tu, UnitCategory::Time, "timeUnit")?;
-    require_category(&out_unit, UnitCategory::DataRate, "outputUnit")?;
+    if let Err(e) = require_category_for(
+        THROUGHPUT,
+        &size_unit,
+        UnitCategory::DataStorage,
+        "dataSizeUnit",
+    ) {
+        return e;
+    }
+    if let Err(e) = require_category_for(THROUGHPUT, &tu, UnitCategory::Time, "timeUnit") {
+        return e;
+    }
+    if let Err(e) =
+        require_category_for(THROUGHPUT, &out_unit, UnitCategory::DataRate, "outputUnit")
+    {
+        return e;
+    }
 
-    let size_value = parse_decimal(data_size, "dataSize")?;
-    let time_value = parse_decimal(time, "time")?;
+    let size_value = match parse_decimal_for(THROUGHPUT, data_size, "dataSize") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let time_value = match parse_decimal_for(THROUGHPUT, time, "time") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
-    let size_bytes = unit_convert(&size_value, &size_unit, "byte")?;
+    let size_bytes = match unit_convert_for(THROUGHPUT, &size_value, &size_unit, "byte") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let size_bits = mul_ctx(&size_bytes, &BigDecimal::from(BITS_PER_BYTE));
-    let seconds = unit_convert(&time_value, &tu, "s")?;
+    let seconds = match unit_convert_for(THROUGHPUT, &time_value, &tu, "s") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if seconds.is_zero() {
+        return error(
+            THROUGHPUT,
+            ErrorCode::DivisionByZero,
+            "time must be greater than zero",
+        );
+    }
     let bps = div_scaled(&size_bits, &seconds);
-    let result = unit_convert(&bps, "bps", &out_unit)?;
-    Ok(strip(&result))
+    let result = match unit_convert_for(THROUGHPUT, &bps, "bps", &out_unit) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    Response::ok(THROUGHPUT).field("RATE", strip(&result)).build()
 }
 
 fn compute_tcp_throughput(
     bandwidth_mbps: &str,
     rtt_ms: &str,
     window_size_kb: &str,
-) -> Result<String, NetError> {
+) -> String {
     let million = BigDecimal::from(1_000_000);
     let thousand = BigDecimal::from(1_000);
     let kilo_bits = BigDecimal::from(8192);
 
-    let bw = parse_decimal(bandwidth_mbps, "bandwidthMbps")?;
-    let rtt = parse_decimal(rtt_ms, "rttMs")?;
-    let window = parse_decimal(window_size_kb, "windowSizeKb")?;
+    let bw = match parse_decimal_for(TCP_THROUGHPUT, bandwidth_mbps, "bandwidthMbps") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let rtt = match parse_decimal_for(TCP_THROUGHPUT, rtt_ms, "rttMs") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let window = match parse_decimal_for(TCP_THROUGHPUT, window_size_kb, "windowSizeKb") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let bw_bps = mul_ctx(&bw, &million);
+    if rtt.is_zero() {
+        return error(
+            TCP_THROUGHPUT,
+            ErrorCode::DivisionByZero,
+            "rtt must be greater than zero",
+        );
+    }
     let rtt_sec = div_scaled(&rtt, &thousand);
     let window_bits = mul_ctx(&window, &kilo_bits);
     let max_by_window = div_scaled(&window_bits, &rtt_sec);
@@ -848,56 +1063,68 @@ fn compute_tcp_throughput(
         max_by_window
     };
     let effective_mbps = div_scaled(&effective, &million);
-    Ok(strip(&effective_mbps))
+    Response::ok(TCP_THROUGHPUT)
+        .field("RATE_MBPS", strip(&effective_mbps))
+        .build()
 }
 
 // ------------------------------------------------------------------ //
 //  JSON array parsing helpers
 // ------------------------------------------------------------------ //
 
-fn parse_int_array(json: &str) -> Result<Vec<i32>, NetError> {
-    match serde_json::from_str::<Vec<i32>>(json) {
-        Ok(v) => Ok(v),
-        Err(_) => {
-            // Match Java's lenient manual parser.
-            let trimmed = json.trim();
-            if trimmed.len() < 2 || !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-                return Err(NetError::new(format!("Invalid JSON array: {json}")));
-            }
-            let inner = trimmed[1..trimmed.len() - 1].trim();
-            if inner.is_empty() {
-                return Ok(Vec::new());
-            }
-            inner
-                .split(',')
-                .map(|el| {
-                    el.trim()
-                        .parse::<i32>()
-                        .map_err(|_| NetError::new(format!("Invalid integer: {}", el.trim())))
-                })
-                .collect()
-        }
+fn parse_int_array(tool: &str, json: &str) -> Result<Vec<i32>, String> {
+    if let Ok(v) = serde_json::from_str::<Vec<i32>>(json) {
+        return Ok(v);
     }
+    let trimmed = json.trim();
+    if trimmed.len() < 2 || !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            "invalid JSON array",
+            &format!("json={json}"),
+        ));
+    }
+    let inner = trimmed[1..trimmed.len() - 1].trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|el| {
+            el.trim().parse::<i32>().map_err(|_| {
+                error_with_detail(
+                    tool,
+                    ErrorCode::ParseError,
+                    "invalid integer",
+                    &format!("value={}", el.trim()),
+                )
+            })
+        })
+        .collect()
 }
 
-fn parse_string_array(json: &str) -> Result<Vec<String>, NetError> {
-    match serde_json::from_str::<Vec<String>>(json) {
-        Ok(v) => Ok(v),
-        Err(_) => {
-            let trimmed = json.trim();
-            if trimmed.len() < 2 || !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-                return Err(NetError::new(format!("Invalid JSON array: {json}")));
-            }
-            let inner = trimmed[1..trimmed.len() - 1].trim();
-            if inner.is_empty() {
-                return Ok(Vec::new());
-            }
-            Ok(inner
-                .split(',')
-                .map(|el| el.trim().replace('"', ""))
-                .collect())
-        }
+fn parse_string_array(tool: &str, json: &str) -> Result<Vec<String>, String> {
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(json) {
+        return Ok(v);
     }
+    let trimmed = json.trim();
+    if trimmed.len() < 2 || !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::ParseError,
+            "invalid JSON array",
+            &format!("json={json}"),
+        ));
+    }
+    let inner = trimmed[1..trimmed.len() - 1].trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(inner
+        .split(',')
+        .map(|el| el.trim().replace('"', ""))
+        .collect())
 }
 
 // ------------------------------------------------------------------ //
@@ -910,163 +1137,186 @@ mod tests {
 
     #[test]
     fn subnet_calc_192_168_1_0_slash_24() {
-        let json = subnet_calculator("192.168.1.0", 24);
-        assert!(json.contains("\"network\":\"192.168.1.0\""));
-        assert!(json.contains("\"broadcast\":\"192.168.1.255\""));
-        assert!(json.contains("\"mask\":\"255.255.255.0\""));
-        assert!(json.contains("\"wildcard\":\"0.0.0.255\""));
-        assert!(json.contains("\"firstHost\":\"192.168.1.1\""));
-        assert!(json.contains("\"lastHost\":\"192.168.1.254\""));
-        assert!(json.contains("\"usableHosts\":254"));
-        assert!(json.contains("\"ipClass\":\"C\""));
+        assert_eq!(
+            subnet_calculator("192.168.1.0", 24),
+            "SUBNET_CALCULATOR: OK | NETWORK: 192.168.1.0 | BROADCAST: 192.168.1.255 | MASK: 255.255.255.0 | WILDCARD: 0.0.0.255 | FIRST_HOST: 192.168.1.1 | LAST_HOST: 192.168.1.254 | USABLE_HOSTS: 254 | IP_CLASS: C"
+        );
     }
 
     #[test]
     fn subnet_calc_cidr_31_point_to_point() {
-        let json = subnet_calculator("10.0.0.0", 31);
-        assert!(json.contains("\"network\":\"10.0.0.0\""));
-        assert!(json.contains("\"broadcast\":\"10.0.0.1\""));
-        assert!(json.contains("\"firstHost\":\"10.0.0.0\""));
-        assert!(json.contains("\"lastHost\":\"10.0.0.1\""));
-        assert!(json.contains("\"usableHosts\":2"));
-        assert!(json.contains("\"ipClass\":\"A\""));
+        assert_eq!(
+            subnet_calculator("10.0.0.0", 31),
+            "SUBNET_CALCULATOR: OK | NETWORK: 10.0.0.0 | BROADCAST: 10.0.0.1 | MASK: 255.255.255.254 | WILDCARD: 0.0.0.1 | FIRST_HOST: 10.0.0.0 | LAST_HOST: 10.0.0.1 | USABLE_HOSTS: 2 | IP_CLASS: A"
+        );
     }
 
     #[test]
     fn subnet_calc_ipv6() {
-        let json = subnet_calculator("2001:db8::", 64);
-        assert!(json.contains("\"network\":\"2001:0db8:0000:0000:0000:0000:0000:0000\""));
-        assert!(json.contains("\"mask\":\"ffff:ffff:ffff:ffff:0000:0000:0000:0000\""));
-        // 2^64 - 2 for usable hosts
-        assert!(json.contains("\"usableHosts\":18446744073709551614"));
+        assert_eq!(
+            subnet_calculator("2001:db8::", 64),
+            "SUBNET_CALCULATOR: OK | NETWORK: 2001:0db8:0000:0000:0000:0000:0000:0000 | MASK: ffff:ffff:ffff:ffff:0000:0000:0000:0000 | FIRST_HOST: 2001:0db8:0000:0000:0000:0000:0000:0001 | LAST_HOST: 2001:0db8:0000:0000:ffff:ffff:ffff:fffe | USABLE_HOSTS: 18446744073709551614"
+        );
     }
 
     #[test]
     fn ip_to_binary_ipv4_roundtrip() {
-        let bin = ip_to_binary("192.168.1.1");
-        assert_eq!(bin, "11000000.10101000.00000001.00000001");
-        let back = binary_to_ip(&bin);
-        assert_eq!(back, "192.168.1.1");
+        assert_eq!(
+            ip_to_binary("192.168.1.1"),
+            "IP_TO_BINARY: OK | RESULT: 11000000.10101000.00000001.00000001"
+        );
+        assert_eq!(
+            binary_to_ip("11000000.10101000.00000001.00000001"),
+            "BINARY_TO_IP: OK | RESULT: 192.168.1.1"
+        );
     }
 
     #[test]
     fn ip_to_binary_ipv6_roundtrip() {
-        let bin = ip_to_binary("::1");
-        // 7 groups of 16 zero bits, then '...0001'
-        assert!(bin.ends_with("0000000000000001"));
-        assert_eq!(bin.matches(':').count(), 7);
-        let back = binary_to_ip(&bin);
-        assert_eq!(back, "0000:0000:0000:0000:0000:0000:0000:0001");
+        assert_eq!(
+            ip_to_binary("::1"),
+            "IP_TO_BINARY: OK | RESULT: 0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000001"
+        );
+        assert_eq!(
+            binary_to_ip(
+                "0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000000:0000000000000001"
+            ),
+            "BINARY_TO_IP: OK | RESULT: 0000:0000:0000:0000:0000:0000:0000:0001"
+        );
     }
 
     #[test]
     fn ip_to_decimal_ipv4_roundtrip() {
-        let dec = ip_to_decimal("192.168.1.1");
-        assert_eq!(dec, "3232235777");
-        let back = decimal_to_ip(&dec, 4);
-        assert_eq!(back, "192.168.1.1");
+        assert_eq!(
+            ip_to_decimal("192.168.1.1"),
+            "IP_TO_DECIMAL: OK | RESULT: 3232235777"
+        );
+        assert_eq!(
+            decimal_to_ip("3232235777", 4),
+            "DECIMAL_TO_IP: OK | RESULT: 192.168.1.1"
+        );
     }
 
     #[test]
     fn ip_to_decimal_ipv6_roundtrip() {
-        let dec = ip_to_decimal("::1");
-        assert_eq!(dec, "1");
-        let back = decimal_to_ip(&dec, 6);
-        assert_eq!(back, "0000:0000:0000:0000:0000:0000:0000:0001");
+        assert_eq!(ip_to_decimal("::1"), "IP_TO_DECIMAL: OK | RESULT: 1");
+        assert_eq!(
+            decimal_to_ip("1", 6),
+            "DECIMAL_TO_IP: OK | RESULT: 0000:0000:0000:0000:0000:0000:0000:0001"
+        );
     }
 
     #[test]
     fn ip_in_subnet_cases() {
-        assert_eq!(ip_in_subnet("192.168.1.50", "192.168.1.0", 24), "true");
-        assert_eq!(ip_in_subnet("192.168.2.1", "192.168.1.0", 24), "false");
-        assert_eq!(ip_in_subnet("2001:db8::1", "2001:db8::", 64), "true");
-        assert_eq!(ip_in_subnet("2001:dc8::1", "2001:db8::", 64), "false");
+        assert_eq!(
+            ip_in_subnet("192.168.1.50", "192.168.1.0", 24),
+            "IP_IN_SUBNET: OK | IN_SUBNET: true"
+        );
+        assert_eq!(
+            ip_in_subnet("192.168.2.1", "192.168.1.0", 24),
+            "IP_IN_SUBNET: OK | IN_SUBNET: false"
+        );
+        assert_eq!(
+            ip_in_subnet("2001:db8::1", "2001:db8::", 64),
+            "IP_IN_SUBNET: OK | IN_SUBNET: true"
+        );
+        assert_eq!(
+            ip_in_subnet("2001:dc8::1", "2001:db8::", 64),
+            "IP_IN_SUBNET: OK | IN_SUBNET: false"
+        );
     }
 
     #[test]
     fn vlsm_basic_slash_24() {
-        let out = vlsm_subnets("192.168.1.0/24", "[50, 25, 10]");
-        // Largest (50) → /26 (64 hosts) at .0, next (25) → /27 at .64, (10) → /28 at .96
-        assert!(out.starts_with('['));
-        assert!(out.ends_with(']'));
-        assert!(out.contains("\"network\":\"192.168.1.0\""));
-        assert!(out.contains("\"cidr\":26"));
-        assert!(out.contains("\"network\":\"192.168.1.64\""));
-        assert!(out.contains("\"cidr\":27"));
-        assert!(out.contains("\"network\":\"192.168.1.96\""));
-        assert!(out.contains("\"cidr\":28"));
+        assert_eq!(
+            vlsm_subnets("192.168.1.0/24", "[50, 25, 10]"),
+            "VLSM_SUBNETS: OK\nCOUNT: 3\nROW_1: hosts=50 | cidr=26 | network=192.168.1.0 | broadcast=192.168.1.63 | usable=62\nROW_2: hosts=25 | cidr=27 | network=192.168.1.64 | broadcast=192.168.1.95 | usable=30\nROW_3: hosts=10 | cidr=28 | network=192.168.1.96 | broadcast=192.168.1.111 | usable=14"
+        );
     }
 
     #[test]
     fn vlsm_cannot_fit() {
-        let out = vlsm_subnets("192.168.1.0/28", "[100]");
-        assert!(out.starts_with("Error: Cannot fit 100 hosts in /28"));
+        assert_eq!(
+            vlsm_subnets("192.168.1.0/28", "[100]"),
+            "VLSM_SUBNETS: ERROR\nREASON: [INVALID_INPUT] cannot fit 100 hosts in /28\nDETAIL: hosts=100"
+        );
     }
 
     #[test]
     fn summarize_two_slash_25_to_slash_24() {
-        let out = summarize_subnets("[\"192.168.0.0/25\",\"192.168.0.128/25\"]");
-        assert_eq!(out, "192.168.0.0/24");
+        assert_eq!(
+            summarize_subnets("[\"192.168.0.0/25\",\"192.168.0.128/25\"]"),
+            "SUMMARIZE_SUBNETS: OK | RESULT: 192.168.0.0/24"
+        );
     }
 
     #[test]
     fn summarize_adjacent_slash_22() {
-        let out = summarize_subnets(
-            "[\"192.168.0.0/24\",\"192.168.1.0/24\",\"192.168.2.0/24\",\"192.168.3.0/24\"]",
+        assert_eq!(
+            summarize_subnets(
+                "[\"192.168.0.0/24\",\"192.168.1.0/24\",\"192.168.2.0/24\",\"192.168.3.0/24\"]",
+            ),
+            "SUMMARIZE_SUBNETS: OK | RESULT: 192.168.0.0/22"
         );
-        assert_eq!(out, "192.168.0.0/22");
     }
 
     #[test]
     fn expand_compress_ipv6_roundtrip() {
-        let expanded = expand_ipv6("::1");
-        assert_eq!(expanded, "0000:0000:0000:0000:0000:0000:0000:0001");
-        let compressed = compress_ipv6(&expanded);
-        assert_eq!(compressed, "::1");
+        assert_eq!(
+            expand_ipv6("::1"),
+            "EXPAND_IPV6: OK | RESULT: 0000:0000:0000:0000:0000:0000:0000:0001"
+        );
+        assert_eq!(
+            compress_ipv6("0000:0000:0000:0000:0000:0000:0000:0001"),
+            "COMPRESS_IPV6: OK | RESULT: ::1"
+        );
     }
 
     #[test]
     fn compress_ipv6_middle_run() {
-        let compressed = compress_ipv6("2001:0db8:0000:0000:0000:0000:0000:0001");
-        assert_eq!(compressed, "2001:db8::1");
+        assert_eq!(
+            compress_ipv6("2001:0db8:0000:0000:0000:0000:0000:0001"),
+            "COMPRESS_IPV6: OK | RESULT: 2001:db8::1"
+        );
     }
 
     #[test]
     fn transfer_time_1gb_at_100mbps() {
-        let json = transfer_time("1", "gb", "100", "mbps");
-        // 1 GB = 8589934592 bits. /100_000_000 = 85.89934592 s
-        assert!(json.contains("\"seconds\":\"85.89934592\""));
-        assert!(json.contains("\"minutes\":"));
-        assert!(json.contains("\"hours\":"));
+        assert_eq!(
+            transfer_time("1", "gb", "100", "mbps"),
+            "TRANSFER_TIME: OK | SECONDS: 85.89934592 | MINUTES: 1.43165576533333333333 | HOURS: 0.02386092942222222222"
+        );
     }
 
     #[test]
     fn throughput_100mb_10s_to_mbps() {
-        let out = throughput("100", "mb", "10", "s", "mbps");
-        // 100 MB = 838860800 bits; /10 = 83886080 bps = 83.88608 Mbps (stripped)
-        assert_eq!(out, "83.88608");
+        assert_eq!(
+            throughput("100", "mb", "10", "s", "mbps"),
+            "THROUGHPUT: OK | RATE: 83.88608"
+        );
     }
 
     #[test]
     fn tcp_throughput_window_limited() {
-        // bw = 1000 Mbps = 1e9 bps; window = 64 KB = 64*8192=524288 bits;
-        // rtt = 100 ms = 0.1 s; max_by_window = 5242880 bps = 5.24288 Mbps
-        let out = tcp_throughput("1000", "100", "64");
-        assert_eq!(out, "5.24288");
+        assert_eq!(
+            tcp_throughput("1000", "100", "64"),
+            "TCP_THROUGHPUT: OK | RATE_MBPS: 5.24288"
+        );
     }
 
     #[test]
     fn tcp_throughput_bw_limited() {
-        // bw = 10 Mbps = 1e7 bps; window = 1024 KB, rtt = 10 ms -> huge max_by_window
-        let out = tcp_throughput("10", "10", "1024");
-        assert_eq!(out, "10");
+        assert_eq!(
+            tcp_throughput("10", "10", "1024"),
+            "TCP_THROUGHPUT: OK | RATE_MBPS: 10"
+        );
     }
 
     #[test]
     fn error_bad_ip() {
         assert_eq!(
             ip_to_decimal("999.999.999.999"),
-            "Error: Octet out of range: 999"
+            "IP_TO_DECIMAL: ERROR\nREASON: [OUT_OF_RANGE] IPv4 octet must be in 0..=255\nDETAIL: address=999.999.999.999"
         );
     }
 
@@ -1074,25 +1324,31 @@ mod tests {
     fn error_bad_cidr() {
         assert_eq!(
             subnet_calculator("192.168.1.0", 33),
-            "Error: CIDR must be 0-32, got 33"
+            "SUBNET_CALCULATOR: ERROR\nREASON: [OUT_OF_RANGE] CIDR must be between 0 and 32\nDETAIL: cidr=33"
         );
     }
 
     #[test]
     fn error_wrong_version() {
-        assert_eq!(decimal_to_ip("1", 5), "Error: Version must be 4 or 6");
+        assert_eq!(
+            decimal_to_ip("1", 5),
+            "DECIMAL_TO_IP: ERROR\nREASON: [INVALID_INPUT] version must be 4 or 6\nDETAIL: version=5"
+        );
     }
 
     #[test]
     fn error_empty_summary_list() {
-        assert_eq!(summarize_subnets("[]"), "Error: Empty subnet list");
+        assert_eq!(
+            summarize_subnets("[]"),
+            "SUMMARIZE_SUBNETS: ERROR\nREASON: [INVALID_INPUT] subnet list must not be empty"
+        );
     }
 
     #[test]
     fn error_binary_to_ipv4_group_count() {
         assert_eq!(
             binary_to_ip("1010.1010"),
-            "Error: Expected 4 dot-separated 8-bit groups"
+            "BINARY_TO_IP: ERROR\nREASON: [INVALID_INPUT] expected 4 dot-separated 8-bit groups\nDETAIL: binary=1010.1010"
         );
     }
 }

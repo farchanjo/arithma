@@ -6,4 +6,5 @@
 
 pub mod bigdecimal_ext;
 pub mod expression;
+pub mod expression_exact;
 pub mod unit_registry;

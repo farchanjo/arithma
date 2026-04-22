@@ -54,6 +54,10 @@ pub enum ExpressionError {
         /// Position where `)` was expected.
         pos: usize,
     },
+    /// Division or modulo by exact zero (exact-precision evaluator only — the
+    /// `f64` evaluator yields IEEE ±Inf or NaN and never emits this variant).
+    #[error("Division by zero")]
+    DivisionByZero,
 }
 
 /// Evaluates a mathematical expression without variables.

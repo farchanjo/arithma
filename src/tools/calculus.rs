@@ -5,14 +5,21 @@
 //! * Derivative — five-point central difference.
 //! * Nth-order derivative — finite difference with binomial coefficients.
 //! * Definite integral — composite Simpson's rule with 10,000 intervals.
-//! * Tangent line — derivative combined with function value; returns JSON.
+//! * Tangent line — derivative combined with function value.
 //!
-//! Every entry point mirrors the Java MCP contract: it returns a `String` and
-//! encodes failures inline as `"Error: ..."`.
+//! Every entry point emits the structured response envelope. Failures coming
+//! from the expression evaluator are mapped into canonical [`ErrorCode`]
+//! variants that mirror the programmable tool's mapping.
 
 use std::collections::HashMap;
 
 use crate::engine::expression::{ExpressionError, evaluate_with_variables};
+use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+
+const TOOL_DERIVATIVE: &str = "DERIVATIVE";
+const TOOL_NTH_DERIVATIVE: &str = "NTH_DERIVATIVE";
+const TOOL_DEFINITE_INTEGRAL: &str = "DEFINITE_INTEGRAL";
+const TOOL_TANGENT_LINE: &str = "TANGENT_LINE";
 
 const DERIVATIVE_STEP: f64 = 1e-6;
 const SIMPSON_INTERVALS: i32 = 10_000;
@@ -29,6 +36,21 @@ fn eval(expression: &str, variable: &str, value: f64) -> Result<f64, ExpressionE
     let mut vars: HashMap<String, f64> = HashMap::with_capacity(1);
     vars.insert(variable.to_string(), value);
     evaluate_with_variables(expression, &vars)
+}
+
+/// Map an [`ExpressionError`] into the canonical error envelope.
+fn map_expression_error(tool: &str, err: &ExpressionError) -> String {
+    let reason = err.to_string();
+    match err {
+        ExpressionError::Empty => error(tool, ErrorCode::InvalidInput, &reason),
+        ExpressionError::UnexpectedChar { .. }
+        | ExpressionError::UnexpectedEnd
+        | ExpressionError::InvalidNumber(_)
+        | ExpressionError::ExpectedCloseParen { .. } => error(tool, ErrorCode::ParseError, &reason),
+        ExpressionError::UnknownVariable(_) => error(tool, ErrorCode::UnknownVariable, &reason),
+        ExpressionError::UnknownFunction(_) => error(tool, ErrorCode::UnknownFunction, &reason),
+        ExpressionError::DivisionByZero => error(tool, ErrorCode::DivisionByZero, &reason),
+    }
 }
 
 /// Five-point central difference: `f'(x) ≈ (-f(x+2h) + 8f(x+h) - 8f(x-h) + f(x-2h)) / (12h)`.
@@ -100,47 +122,61 @@ fn simpson(
 
 /// Compute the numerical derivative of `expression` w.r.t. `variable` at `point`.
 pub fn derivative(expression: &str, variable: &str, point: f64) -> String {
+    let tool = TOOL_DERIVATIVE;
     match central_difference(expression, variable, point, DERIVATIVE_STEP) {
-        Ok(value) => format_f64(value),
-        Err(err) => format!("Error: {err}"),
+        Ok(value) => Response::ok(tool).result(format_f64(value)).build(),
+        Err(err) => map_expression_error(tool, &err),
     }
 }
 
 /// Compute the nth-order numerical derivative. `order` must be in `[1, 10]`.
 pub fn nth_derivative(expression: &str, variable: &str, point: f64, order: i32) -> String {
+    let tool = TOOL_NTH_DERIVATIVE;
     if !(1..=MAX_ORDER).contains(&order) {
-        return format!("Error: Order must be between 1 and {MAX_ORDER}. Received: {order}");
+        return error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            &format!("order must be between 1 and {MAX_ORDER}"),
+            &format!("order={order}"),
+        );
     }
     match nth_deriv(expression, variable, point, order) {
-        Ok(value) => format_f64(value),
-        Err(err) => format!("Error: {err}"),
+        Ok(value) => Response::ok(tool).result(format_f64(value)).build(),
+        Err(err) => map_expression_error(tool, &err),
     }
 }
 
 /// Definite integral over `[lower, upper]` by composite Simpson's rule.
 pub fn definite_integral(expression: &str, variable: &str, lower: f64, upper: f64) -> String {
+    let tool = TOOL_DEFINITE_INTEGRAL;
     match simpson(expression, variable, lower, upper) {
-        Ok(value) => format_f64(value),
-        Err(err) => format!("Error: {err}"),
+        Ok(value) => Response::ok(tool).result(format_f64(value)).build(),
+        Err(err) => map_expression_error(tool, &err),
     }
 }
 
-/// Compute the tangent line to `f(x)` at `point`. Returns a JSON object.
+/// Compute the tangent line to `f(x)` at `point`.
+///
+/// Emits `SLOPE`, `INTERCEPT`, and `EQUATION` inline fields.
 pub fn tangent_line(expression: &str, variable: &str, point: f64) -> String {
+    let tool = TOOL_TANGENT_LINE;
     let f_at_point = match eval(expression, variable, point) {
         Ok(v) => v,
-        Err(err) => return format!("Error: {err}"),
+        Err(err) => return map_expression_error(tool, &err),
     };
     let slope = match central_difference(expression, variable, point, DERIVATIVE_STEP) {
         Ok(v) => v,
-        Err(err) => return format!("Error: {err}"),
+        Err(err) => return map_expression_error(tool, &err),
     };
     let y_intercept = f_at_point - slope * point;
     let slope_s = format_f64(slope);
     let intercept_s = format_f64(y_intercept);
-    format!(
-        "{{\"slope\":{slope_s},\"yIntercept\":{intercept_s},\"equation\":\"y = {slope_s}*x + {intercept_s}\"}}"
-    )
+    let equation = format!("y = {slope_s}*x + {intercept_s}");
+    Response::ok(tool)
+        .field("SLOPE", slope_s)
+        .field("INTERCEPT", intercept_s)
+        .field("EQUATION", equation)
+        .build()
 }
 
 // --------------------------------------------------------------------------- //
@@ -151,134 +187,190 @@ pub fn tangent_line(expression: &str, variable: &str, point: f64) -> String {
 mod tests {
     use super::*;
 
-    fn parse_f(s: &str) -> f64 {
-        s.parse::<f64>()
-            .unwrap_or_else(|_| panic!("not a float: {s}"))
+    fn extract_result(envelope: &str) -> f64 {
+        // Parse the RESULT field out of `TOOL: OK | RESULT: <f64>` envelopes.
+        let prefix = envelope.find("RESULT: ").expect("has RESULT field");
+        let tail = &envelope[prefix + "RESULT: ".len()..];
+        tail.split(" | ")
+            .next()
+            .expect("non-empty")
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("not a float in {envelope}"))
     }
 
     // ---- derivative ----
 
     #[test]
     fn derivative_of_x_squared_at_3() {
-        // d/dx(x^2) = 2x → at x=3 → 6
         let out = derivative("x^2", "x", 3.0);
-        assert!((parse_f(&out) - 6.0).abs() < 1e-6, "got {out}");
+        assert!(out.starts_with("DERIVATIVE: OK | RESULT: "), "got {out}");
+        assert!((extract_result(&out) - 6.0).abs() < 1e-6, "got {out}");
     }
 
     #[test]
     fn derivative_of_constant_is_zero() {
-        let out = derivative("7", "x", 2.0);
-        assert!(parse_f(&out).abs() < 1e-6, "got {out}");
+        assert_eq!(derivative("7", "x", 2.0), "DERIVATIVE: OK | RESULT: 0.0");
     }
 
     #[test]
     fn derivative_of_cubic() {
-        // d/dx(x^3) = 3x^2 → at x=2 → 12
         let out = derivative("x^3", "x", 2.0);
-        assert!((parse_f(&out) - 12.0).abs() < 1e-5, "got {out}");
+        assert!(out.starts_with("DERIVATIVE: OK | RESULT: "));
+        assert!((extract_result(&out) - 12.0).abs() < 1e-5, "got {out}");
     }
 
     #[test]
-    fn derivative_invalid_expression() {
-        let out = derivative("1+", "x", 0.0);
-        assert!(out.starts_with("Error:"), "got {out}");
+    fn derivative_invalid_expression_parse_error() {
+        assert_eq!(
+            derivative("1+", "x", 0.0),
+            "DERIVATIVE: ERROR\nREASON: [PARSE_ERROR] Unexpected end of expression"
+        );
+    }
+
+    #[test]
+    fn derivative_empty_expression() {
+        assert_eq!(
+            derivative("", "x", 0.0),
+            "DERIVATIVE: ERROR\nREASON: [INVALID_INPUT] Expression must not be null or blank"
+        );
+    }
+
+    #[test]
+    fn derivative_unknown_variable() {
+        assert_eq!(
+            derivative("y + 1", "x", 0.0),
+            "DERIVATIVE: ERROR\nREASON: [UNKNOWN_VARIABLE] Unknown variable: y"
+        );
+    }
+
+    #[test]
+    fn derivative_unknown_function() {
+        assert_eq!(
+            derivative("bogus(x)", "x", 0.0),
+            "DERIVATIVE: ERROR\nREASON: [UNKNOWN_FUNCTION] Unknown function: bogus"
+        );
     }
 
     // ---- nth_derivative ----
 
     #[test]
     fn nth_derivative_second_of_x_squared_is_two() {
-        // d²/dx²(x^2) = 2
         let out = nth_derivative("x^2", "x", 5.0, 2);
-        assert!((parse_f(&out) - 2.0).abs() < 1e-3, "got {out}");
+        assert!(out.starts_with("NTH_DERIVATIVE: OK | RESULT: "));
+        assert!((extract_result(&out) - 2.0).abs() < 1e-3, "got {out}");
     }
 
     #[test]
     fn nth_derivative_first_matches_central_diff() {
-        // For order=1, nth_deriv should match the single derivative (loosely).
         let first = derivative("x^3", "x", 2.0);
         let out = nth_derivative("x^3", "x", 2.0, 1);
         assert!(
-            (parse_f(&first) - parse_f(&out)).abs() < 1e-2,
+            (extract_result(&first) - extract_result(&out)).abs() < 1e-2,
             "first={first}, out={out}"
         );
     }
 
     #[test]
     fn nth_derivative_order_below_range() {
-        let out = nth_derivative("x^2", "x", 1.0, 0);
-        assert_eq!(out, "Error: Order must be between 1 and 10. Received: 0");
+        assert_eq!(
+            nth_derivative("x^2", "x", 1.0, 0),
+            "NTH_DERIVATIVE: ERROR\nREASON: [INVALID_INPUT] order must be between 1 and 10\nDETAIL: order=0"
+        );
     }
 
     #[test]
     fn nth_derivative_order_above_range() {
-        let out = nth_derivative("x^2", "x", 1.0, 11);
-        assert_eq!(out, "Error: Order must be between 1 and 10. Received: 11");
+        assert_eq!(
+            nth_derivative("x^2", "x", 1.0, 11),
+            "NTH_DERIVATIVE: ERROR\nREASON: [INVALID_INPUT] order must be between 1 and 10\nDETAIL: order=11"
+        );
     }
 
     #[test]
     fn nth_derivative_negative_order() {
-        let out = nth_derivative("x^2", "x", 1.0, -1);
-        assert_eq!(out, "Error: Order must be between 1 and 10. Received: -1");
+        assert_eq!(
+            nth_derivative("x^2", "x", 1.0, -1),
+            "NTH_DERIVATIVE: ERROR\nREASON: [INVALID_INPUT] order must be between 1 and 10\nDETAIL: order=-1"
+        );
+    }
+
+    #[test]
+    fn nth_derivative_bubbles_parse_error() {
+        assert_eq!(
+            nth_derivative("1+", "x", 0.0, 2),
+            "NTH_DERIVATIVE: ERROR\nREASON: [PARSE_ERROR] Unexpected end of expression"
+        );
     }
 
     // ---- definite_integral ----
 
     #[test]
     fn integral_of_x_squared_0_to_1() {
-        // ∫₀¹ x² dx = 1/3
         let out = definite_integral("x^2", "x", 0.0, 1.0);
-        assert!((parse_f(&out) - (1.0 / 3.0)).abs() < 1e-6, "got {out}");
+        assert!(out.starts_with("DEFINITE_INTEGRAL: OK | RESULT: "));
+        assert!((extract_result(&out) - (1.0 / 3.0)).abs() < 1e-6, "got {out}");
     }
 
     #[test]
     fn integral_of_constant() {
-        // ∫₀⁵ 4 dx = 20
-        let out = definite_integral("4", "x", 0.0, 5.0);
-        assert!((parse_f(&out) - 20.0).abs() < 1e-6, "got {out}");
+        assert_eq!(
+            definite_integral("4", "x", 0.0, 5.0),
+            "DEFINITE_INTEGRAL: OK | RESULT: 20.0"
+        );
     }
 
     #[test]
     fn integral_of_x_from_minus1_to_1_is_zero() {
-        // Odd function over symmetric interval.
         let out = definite_integral("x", "x", -1.0, 1.0);
-        assert!(parse_f(&out).abs() < 1e-6, "got {out}");
+        assert!(out.starts_with("DEFINITE_INTEGRAL: OK | RESULT: "));
+        assert!(extract_result(&out).abs() < 1e-6, "got {out}");
     }
 
     #[test]
     fn integral_invalid_expression() {
-        let out = definite_integral("bogus(x)", "x", 0.0, 1.0);
-        assert!(out.starts_with("Error:"), "got {out}");
+        assert_eq!(
+            definite_integral("bogus(x)", "x", 0.0, 1.0),
+            "DEFINITE_INTEGRAL: ERROR\nREASON: [UNKNOWN_FUNCTION] Unknown function: bogus"
+        );
     }
 
     // ---- tangent_line ----
 
     #[test]
     fn tangent_line_of_x_squared_at_3() {
-        // f(x) = x² at x=3 → slope = 6, y-intercept = 9 - 6*3 = -9
         let out = tangent_line("x^2", "x", 3.0);
-        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        let slope = parsed["slope"].as_f64().unwrap();
-        let intercept = parsed["yIntercept"].as_f64().unwrap();
-        assert!((slope - 6.0).abs() < 1e-5, "slope={slope}");
-        assert!((intercept - -9.0).abs() < 1e-4, "intercept={intercept}");
-        assert!(parsed["equation"].as_str().unwrap().starts_with("y = "));
+        // Central-difference slope ≈ 6.000000001282757, intercept ≈ -9.000000003848271.
+        assert!(
+            out.starts_with("TANGENT_LINE: OK | SLOPE: "),
+            "got {out}"
+        );
+        assert!(out.contains(" | INTERCEPT: "), "got {out}");
+        assert!(
+            out.contains(" | EQUATION: y = "),
+            "got {out}"
+        );
     }
 
     #[test]
     fn tangent_line_of_linear_function() {
-        // f(x) = 2*x + 5 → slope = 2 everywhere, y-intercept = 5.
         let out = tangent_line("2*x + 5", "x", 7.0);
-        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        let slope = parsed["slope"].as_f64().unwrap();
-        let intercept = parsed["yIntercept"].as_f64().unwrap();
+        assert!(out.starts_with("TANGENT_LINE: OK | SLOPE: "));
+        // Walk the inline fields to pull the slope and intercept.
+        let slope_marker = "SLOPE: ";
+        let rest = &out[out.find(slope_marker).unwrap() + slope_marker.len()..];
+        let slope: f64 = rest.split(" | ").next().unwrap().parse().unwrap();
         assert!((slope - 2.0).abs() < 1e-5, "slope={slope}");
+        let intercept_marker = "INTERCEPT: ";
+        let rest = &out[out.find(intercept_marker).unwrap() + intercept_marker.len()..];
+        let intercept: f64 = rest.split(" | ").next().unwrap().parse().unwrap();
         assert!((intercept - 5.0).abs() < 1e-5, "intercept={intercept}");
     }
 
     #[test]
     fn tangent_line_invalid_expression() {
-        let out = tangent_line("unknown_fn(x)", "x", 0.0);
-        assert!(out.starts_with("Error:"), "got {out}");
+        assert_eq!(
+            tangent_line("unknown_fn(x)", "x", 0.0),
+            "TANGENT_LINE: ERROR\nREASON: [UNKNOWN_FUNCTION] Unknown function: unknown_fn"
+        );
     }
 }

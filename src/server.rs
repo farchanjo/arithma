@@ -31,17 +31,6 @@ impl Default for MathCalcServer {
 }
 
 // --------------------------------------------------------------------------- //
-//  Local adapter: Result<String, E> -> String with "Error: ..." prefix.
-// --------------------------------------------------------------------------- //
-
-fn inline<E: std::fmt::Display>(result: Result<String, E>) -> String {
-    match result {
-        Ok(value) => value,
-        Err(err) => format!("Error: {err}"),
-    }
-}
-
-// --------------------------------------------------------------------------- //
 //  Parameter structs — deduplicated by shape. `#[serde(rename_all = "camelCase")]`
 //  is applied to structs with multi-word fields so the JSON keys match the
 //  Java Spring AI convention (e.g. `fromUnit`, `annualRate`).
@@ -699,37 +688,37 @@ impl MathCalcServer {
 
     #[tool(description = "Add two numbers. Returns exact arbitrary-precision result.")]
     fn add(&self, Parameters(p): Parameters<BinaryDecimalParams>) -> String {
-        inline(basic::add(&p.first, &p.second))
+        basic::add(&p.first, &p.second)
     }
 
     #[tool(description = "Subtract second from first. Returns exact arbitrary-precision result.")]
     fn subtract(&self, Parameters(p): Parameters<BinaryDecimalParams>) -> String {
-        inline(basic::subtract(&p.first, &p.second))
+        basic::subtract(&p.first, &p.second)
     }
 
     #[tool(description = "Multiply two numbers. Returns exact arbitrary-precision result.")]
     fn multiply(&self, Parameters(p): Parameters<BinaryDecimalParams>) -> String {
-        inline(basic::multiply(&p.first, &p.second))
+        basic::multiply(&p.first, &p.second)
     }
 
     #[tool(description = "Divide first by second. 20-digit precision, HALF_UP rounding.")]
     fn divide(&self, Parameters(p): Parameters<BinaryDecimalParams>) -> String {
-        inline(basic::divide(&p.first, &p.second))
+        basic::divide(&p.first, &p.second)
     }
 
     #[tool(description = "Raise base to a non-negative integer exponent. Exact result.")]
     fn power(&self, Parameters(p): Parameters<PowerParams>) -> String {
-        inline(basic::power(&p.base, &p.exponent))
+        basic::power(&p.base, &p.exponent)
     }
 
     #[tool(description = "Remainder of first divided by second. Exact result.")]
     fn modulo(&self, Parameters(p): Parameters<BinaryDecimalParams>) -> String {
-        inline(basic::modulo(&p.first, &p.second))
+        basic::modulo(&p.first, &p.second)
     }
 
     #[tool(description = "Absolute value of a decimal. Exact result.")]
     fn abs(&self, Parameters(p): Parameters<UnaryDecimalParams>) -> String {
-        inline(basic::abs(&p.value))
+        basic::abs(&p.value)
     }
 
     // ---- Scientific ----------------------------------------------------- //
@@ -791,6 +780,25 @@ impl MathCalcServer {
         Parameters(p): Parameters<EvaluateWithVariablesParams>,
     ) -> String {
         programmable::evaluate_with_variables(&p.expression, &p.variables)
+    }
+
+    #[tool(
+        name = "evaluateExact",
+        description = "Evaluate an arithmetic expression at 128-bit precision (astro-float). Returns exact decimals (0.1+0.2 = 0.3)."
+    )]
+    fn evaluate_exact(&self, Parameters(p): Parameters<EvaluateParams>) -> String {
+        programmable::evaluate_exact(&p.expression)
+    }
+
+    #[tool(
+        name = "evaluateExactWithVariables",
+        description = "Exact evaluator with JSON variable map. Variable values may be numbers or decimal strings; strings preserve >15-digit precision."
+    )]
+    fn evaluate_exact_with_variables(
+        &self,
+        Parameters(p): Parameters<EvaluateWithVariablesParams>,
+    ) -> String {
+        programmable::evaluate_exact_with_variables(&p.expression, &p.variables)
     }
 
     // ---- Vector (SIMD) -------------------------------------------------- //
@@ -1384,23 +1392,26 @@ impl ServerHandler for MathCalcServer {
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Pure-Rust math calculator MCP server. Exposes 84 tools across 16 categories: \
-                 Basic (add, subtract, multiply, divide, power, modulo, abs), \
-                 Scientific (sqrt, log, log10, factorial, sin, cos, tan), \
-                 Programmable (evaluate, evaluateWithVariables), \
-                 Vector/SIMD (sumArray, dotProduct, scaleArray, magnitudeArray), \
-                 Financial (compoundInterest, loanPayment, presentValue, futureValueAnnuity, returnOnInvestment, amortizationSchedule), \
-                 Calculus (derivative, nthDerivative, definiteIntegral, tangentLine), \
-                 Unit converter (convert, convertAutoDetect), \
-                 Cooking (convertCookingVolume, convertCookingWeight, convertOvenTemperature), \
-                 Measure reference (listCategories, listUnits, getConversionFactor, explainConversion), \
-                 DateTime (convertTimezone, formatDateTime, currentDateTime, listTimezones, dateTimeDifference), \
-                 Printing tape (calculateWithTape), \
-                 Graphing (plotFunction, solveEquation, findRoots), \
-                 Network (subnetCalculator, ipToBinary, binaryToIp, ipToDecimal, decimalToIp, ipInSubnet, vlsmSubnets, summarizeSubnets, expandIpv6, compressIpv6, transferTime, throughput, tcpThroughput), \
-                 Analog electronics (ohmsLaw, resistorCombination, capacitorCombination, inductorCombination, voltageDivider, currentDivider, rcTimeConstant, rlTimeConstant, rlcResonance, impedance, decibelConvert, filterCutoff, ledResistor, wheatstoneBridge), \
-                 Digital electronics (convertBase, twosComplement, grayCode, bitwiseOp, adcResolution, dacOutput, timer555Astable, timer555Monostable, frequencyPeriod, nyquistRate). \
-                 All tools return plain strings; computation failures surface as 'Error: ...' messages.",
+                "Pure-Rust math calculator MCP server. 87 tools across 16 categories. \
+                 Response format: `TOOL_NAME: OK | KEY: value | ...` (inline) or block layout with `ROW_N` keys for tabular payloads. \
+                 Errors: `TOOL_NAME: ERROR` + `REASON: [CODE] text` + optional `DETAIL: k=v`. \
+                 Error codes: DOMAIN_ERROR, OUT_OF_RANGE, DIVISION_BY_ZERO, PARSE_ERROR, INVALID_INPUT, UNKNOWN_VARIABLE, UNKNOWN_FUNCTION, OVERFLOW, NOT_IMPLEMENTED. \
+                 Categories: \
+                 Basic (add, subtract, multiply, divide, power, modulo, abs); \
+                 Scientific (sqrt, log, log10, factorial, sin, cos, tan); \
+                 Programmable (evaluate, evaluateWithVariables, evaluateExact, evaluateExactWithVariables); \
+                 Vector/SIMD (sumArray, dotProduct, scaleArray, magnitudeArray); \
+                 Financial (compoundInterest, loanPayment, presentValue, futureValueAnnuity, returnOnInvestment, amortizationSchedule); \
+                 Calculus (derivative, nthDerivative, definiteIntegral, tangentLine); \
+                 Unit converter (convert, convertAutoDetect); \
+                 Cooking (convertCookingVolume, convertCookingWeight, convertOvenTemperature); \
+                 Measure reference (listCategories, listUnits, getConversionFactor, explainConversion); \
+                 DateTime (convertTimezone, formatDateTime, currentDateTime, listTimezones, dateTimeDifference); \
+                 Printing tape (calculateWithTape); \
+                 Graphing (plotFunction, solveEquation, findRoots); \
+                 Network (subnetCalculator, ipToBinary, binaryToIp, ipToDecimal, decimalToIp, ipInSubnet, vlsmSubnets, summarizeSubnets, expandIpv6, compressIpv6, transferTime, throughput, tcpThroughput); \
+                 Analog electronics (ohmsLaw, resistorCombination, capacitorCombination, inductorCombination, voltageDivider, currentDivider, rcTimeConstant, rlTimeConstant, rlcResonance, impedance, decibelConvert, filterCutoff, ledResistor, wheatstoneBridge); \
+                 Digital electronics (convertBase, twosComplement, grayCode, bitwiseOp, adcResolution, dacOutput, timer555Astable, timer555Monostable, frequencyPeriod, nyquistRate).",
             )
     }
 }
