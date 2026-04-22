@@ -50,6 +50,7 @@ pub fn evaluate_with_variables(
     let result = {
         let mut parser = Parser::new(expression, variables, &mut consts);
         let value = parser.parse_expression()?;
+        parser.skip_whitespace();
         if let Some(ch) = parser.current_char() {
             return Err(ExpressionError::UnexpectedChar {
                 pos: parser.pos,
@@ -236,9 +237,8 @@ impl<'a, 'c> Parser<'a, 'c> {
         variables: &'a HashMap<String, String>,
         consts: &'c mut Consts,
     ) -> Self {
-        let stripped: Vec<char> = input.chars().filter(|c| !c.is_whitespace()).collect();
         Self {
-            input: stripped,
+            input: input.chars().collect(),
             variables,
             pos: 0,
             paren_depth: 0,
@@ -250,15 +250,28 @@ impl<'a, 'c> Parser<'a, 'c> {
         self.input.get(self.pos).copied()
     }
 
+    /// Skip whitespace at the current position. Matches the f64 parser:
+    /// whitespace only separates tokens, it never fuses them.
+    fn skip_whitespace(&mut self) {
+        while let Some(ch) = self.current_char() {
+            if ch.is_whitespace() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
     fn parse_expression(&mut self) -> Result<BigDecimal, ExpressionError> {
         let mut result = self.parse_term()?;
-        while let Some(ch) = self.current_char() {
-            match ch {
-                '+' => {
+        loop {
+            self.skip_whitespace();
+            match self.current_char() {
+                Some('+') => {
                     self.pos += 1;
                     result = &result + &self.parse_term()?;
                 }
-                '-' => {
+                Some('-') => {
                     self.pos += 1;
                     result = &result - &self.parse_term()?;
                 }
@@ -270,18 +283,19 @@ impl<'a, 'c> Parser<'a, 'c> {
 
     fn parse_term(&mut self) -> Result<BigDecimal, ExpressionError> {
         let mut result = self.parse_power()?;
-        while let Some(ch) = self.current_char() {
-            match ch {
-                '*' => {
+        loop {
+            self.skip_whitespace();
+            match self.current_char() {
+                Some('*') => {
                     self.pos += 1;
                     result = &result * &self.parse_power()?;
                 }
-                '/' => {
+                Some('/') => {
                     self.pos += 1;
                     let rhs = self.parse_power()?;
                     result = divide(&result, &rhs)?;
                 }
-                '%' => {
+                Some('%') => {
                     self.pos += 1;
                     let rhs = self.parse_power()?;
                     result = modulo(&result, &rhs)?;
@@ -294,6 +308,7 @@ impl<'a, 'c> Parser<'a, 'c> {
 
     fn parse_power(&mut self) -> Result<BigDecimal, ExpressionError> {
         let base = self.parse_unary()?;
+        self.skip_whitespace();
         if self.current_char() == Some('^') {
             self.pos += 1;
             let exponent = self.parse_power()?;
@@ -303,6 +318,7 @@ impl<'a, 'c> Parser<'a, 'c> {
     }
 
     fn parse_unary(&mut self) -> Result<BigDecimal, ExpressionError> {
+        self.skip_whitespace();
         if self.current_char() == Some('-') {
             self.pos += 1;
             let value = self.parse_unary()?;
@@ -312,6 +328,7 @@ impl<'a, 'c> Parser<'a, 'c> {
     }
 
     fn parse_primary(&mut self) -> Result<BigDecimal, ExpressionError> {
+        self.skip_whitespace();
         let ch = self.current_char().ok_or(ExpressionError::UnexpectedEnd)?;
         if ch == '(' {
             self.pos += 1;
@@ -367,6 +384,7 @@ impl<'a, 'c> Parser<'a, 'c> {
             }
         }
         let name: String = self.input[start..self.pos].iter().collect();
+        self.skip_whitespace();
 
         if self.current_char() == Some('(') {
             self.pos += 1;
@@ -388,6 +406,7 @@ impl<'a, 'c> Parser<'a, 'c> {
     }
 
     fn expect_close_paren(&mut self) -> Result<(), ExpressionError> {
+        self.skip_whitespace();
         if self.current_char() != Some(')') {
             return Err(ExpressionError::ExpectedCloseParen { pos: self.pos });
         }
@@ -576,5 +595,26 @@ mod tests {
             matches!(err, ExpressionError::ExpectedCloseParen { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn adjacent_numbers_reject() {
+        // Regression: `"1 2 3"` used to collapse to `123` because the parser
+        // stripped whitespace globally before tokenizing.
+        let err = evaluate("1 2 3").unwrap_err();
+        match err {
+            ExpressionError::UnexpectedChar { pos, ch } => {
+                assert_eq!(pos, 2);
+                assert_eq!(ch, '2');
+            }
+            other => panic!("expected UnexpectedChar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whitespace_between_tokens_still_works() {
+        // Whitespace must still be valid as a token separator.
+        assert_eq!(evaluate("  1  +  2  ").unwrap(), "3");
+        assert_eq!(evaluate("sqrt( 4 )").unwrap(), "2");
     }
 }
