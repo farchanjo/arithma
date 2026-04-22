@@ -503,6 +503,22 @@ pub fn voltage_divider(vin: &str, r1: &str, r2: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if r1_v.is_negative() {
+        return error_with_detail(
+            VOLTAGE_DIVIDER,
+            ErrorCode::InvalidInput,
+            "r1 must not be negative",
+            &format!("r1={r1}"),
+        );
+    }
+    if r2_v.is_negative() {
+        return error_with_detail(
+            VOLTAGE_DIVIDER,
+            ErrorCode::InvalidInput,
+            "r2 must not be negative",
+            &format!("r2={r2}"),
+        );
+    }
     let sum = add_ctx(&r1_v, &r2_v);
     if sum.is_zero() {
         return error(
@@ -531,6 +547,22 @@ pub fn current_divider(total_current: &str, r1: &str, r2: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if r1_v.is_negative() {
+        return error_with_detail(
+            CURRENT_DIVIDER,
+            ErrorCode::InvalidInput,
+            "r1 must not be negative",
+            &format!("r1={r1}"),
+        );
+    }
+    if r2_v.is_negative() {
+        return error_with_detail(
+            CURRENT_DIVIDER,
+            ErrorCode::InvalidInput,
+            "r2 must not be negative",
+            &format!("r2={r2}"),
+        );
+    }
     let sum = add_ctx(&r1_v, &r2_v);
     if sum.is_zero() {
         return error(
@@ -615,6 +647,30 @@ pub fn rlc_resonance(r: &str, l: &str, c: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if r_v.is_zero() || r_v.is_negative() {
+        return error_with_detail(
+            RLC_RESONANCE,
+            ErrorCode::InvalidInput,
+            "resistance must be positive",
+            &format!("resistance={r}"),
+        );
+    }
+    if l_v.is_zero() || l_v.is_negative() {
+        return error_with_detail(
+            RLC_RESONANCE,
+            ErrorCode::InvalidInput,
+            "inductance must be positive",
+            &format!("inductance={l}"),
+        );
+    }
+    if c_v.is_zero() || c_v.is_negative() {
+        return error_with_detail(
+            RLC_RESONANCE,
+            ErrorCode::InvalidInput,
+            "capacitance must be positive",
+            &format!("capacitance={c}"),
+        );
+    }
     let lc = mul_ctx(&l_v, &c_v);
     if let Err(e) = positive(RLC_RESONANCE, &lc, "L*C") {
         return e;
@@ -859,11 +915,28 @@ pub fn wheatstone_bridge(r1: &str, r2: &str, r3: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if r1_v.is_zero() {
-        return error(
+    if r1_v.is_zero() || r1_v.is_negative() {
+        return error_with_detail(
             WHEATSTONE_BRIDGE,
-            ErrorCode::DivisionByZero,
-            "R1 must not be zero",
+            ErrorCode::InvalidInput,
+            "r1 must be positive",
+            &format!("r1={r1}"),
+        );
+    }
+    if r2_v.is_negative() {
+        return error_with_detail(
+            WHEATSTONE_BRIDGE,
+            ErrorCode::InvalidInput,
+            "r2 must not be negative",
+            &format!("r2={r2}"),
+        );
+    }
+    if r3_v.is_negative() {
+        return error_with_detail(
+            WHEATSTONE_BRIDGE,
+            ErrorCode::InvalidInput,
+            "r3 must not be negative",
+            &format!("r3={r3}"),
         );
     }
     let r4 = div_scaled(&mul_ctx(&r3_v, &r2_v), &r1_v);
@@ -1035,7 +1108,7 @@ mod tests {
     fn wheatstone_zero_denominator() {
         assert_eq!(
             wheatstone_bridge("0", "10", "10"),
-            "WHEATSTONE_BRIDGE: ERROR\nREASON: [DIVISION_BY_ZERO] R1 must not be zero"
+            "WHEATSTONE_BRIDGE: ERROR\nREASON: [INVALID_INPUT] r1 must be positive\nDETAIL: r1=0"
         );
     }
 
@@ -1171,5 +1244,85 @@ mod tests {
         assert!(out.starts_with("RLC_RESONANCE: OK | RESONANT_FREQUENCY: "));
         assert!(out.contains(" | Q_FACTOR: "));
         assert!(out.contains(" | BANDWIDTH: "));
+    }
+
+    #[test]
+    fn voltage_divider_rejects_negative_r1() {
+        let out = voltage_divider("10", "-100", "50");
+        assert!(out.contains("VOLTAGE_DIVIDER: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r1 must not be negative"));
+    }
+
+    #[test]
+    fn voltage_divider_rejects_negative_r2() {
+        let out = voltage_divider("10", "100", "-50");
+        assert!(out.contains("VOLTAGE_DIVIDER: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r2 must not be negative"));
+    }
+
+    #[test]
+    fn current_divider_rejects_negative_r1() {
+        let out = current_divider("5", "-100", "50");
+        assert!(out.contains("CURRENT_DIVIDER: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r1 must not be negative"));
+    }
+
+    #[test]
+    fn current_divider_rejects_negative_r2() {
+        let out = current_divider("5", "100", "-50");
+        assert!(out.contains("CURRENT_DIVIDER: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r2 must not be negative"));
+    }
+
+    #[test]
+    fn rlc_resonance_rejects_negative_resistance() {
+        let out = rlc_resonance("-10", "0.001", "0.000001");
+        assert!(out.contains("RLC_RESONANCE: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("resistance must be positive"));
+    }
+
+    #[test]
+    fn rlc_resonance_rejects_zero_inductance() {
+        let out = rlc_resonance("10", "0", "0.000001");
+        assert!(out.contains("RLC_RESONANCE: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("inductance must be positive"));
+    }
+
+    #[test]
+    fn rlc_resonance_rejects_negative_capacitance() {
+        let out = rlc_resonance("10", "0.001", "-0.000001");
+        assert!(out.contains("RLC_RESONANCE: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("capacitance must be positive"));
+    }
+
+    #[test]
+    fn wheatstone_bridge_rejects_negative_r1() {
+        let out = wheatstone_bridge("-100", "200", "150");
+        assert!(out.contains("WHEATSTONE_BRIDGE: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r1 must be positive"));
+    }
+
+    #[test]
+    fn wheatstone_bridge_rejects_negative_r2() {
+        let out = wheatstone_bridge("100", "-200", "150");
+        assert!(out.contains("WHEATSTONE_BRIDGE: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r2 must not be negative"));
+    }
+
+    #[test]
+    fn wheatstone_bridge_rejects_negative_r3() {
+        let out = wheatstone_bridge("100", "200", "-150");
+        assert!(out.contains("WHEATSTONE_BRIDGE: ERROR"));
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("r3 must not be negative"));
     }
 }
