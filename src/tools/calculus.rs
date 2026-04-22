@@ -119,18 +119,60 @@ fn simpson(
 //  Public tool entry points
 // --------------------------------------------------------------------------- //
 
+/// Guard against evaluating a derivative at a point where the underlying
+/// function is itself undefined. Central differences only sample `point±h`
+/// and `point±2h`, so a pole such as `1/x` at `x=0` used to return a huge
+/// but finite spurious value — surface it as a `DOMAIN_ERROR` instead.
+///
+/// When `eval` fails with `DivisionByZero` or `DomainError` at the point,
+/// both are reported uniformly as `DOMAIN_ERROR` with a "singularity" reason
+/// — from the caller's perspective, the derivative simply doesn't exist
+/// there, and that framing is more useful than the raw evaluator error.
+fn ensure_defined_at(
+    tool: &str,
+    expression: &str,
+    variable: &str,
+    point: f64,
+) -> Result<(), String> {
+    let undefined = || {
+        error_with_detail(
+            tool,
+            ErrorCode::DomainError,
+            "function is not defined at the evaluation point",
+            &format!("{variable}={point}"),
+        )
+    };
+    match eval(expression, variable, point) {
+        Ok(v) if v.is_finite() => Ok(()),
+        Ok(_) => Err(undefined()),
+        Err(ExpressionError::DivisionByZero | ExpressionError::DomainError { .. }) => {
+            Err(undefined())
+        }
+        Err(err) => Err(map_expression_error(tool, &err)),
+    }
+}
+
 /// Compute the numerical derivative of `expression` w.r.t. `variable` at `point`.
-#[must_use] 
+#[must_use]
 pub fn derivative(expression: &str, variable: &str, point: f64) -> String {
     let tool = TOOL_DERIVATIVE;
+    if let Err(msg) = ensure_defined_at(tool, expression, variable, point) {
+        return msg;
+    }
     match central_difference(expression, variable, point, DERIVATIVE_STEP) {
+        Ok(value) if !value.is_finite() => error_with_detail(
+            tool,
+            ErrorCode::DomainError,
+            "derivative diverges at the evaluation point",
+            &format!("{variable}={point}"),
+        ),
         Ok(value) => Response::ok(tool).result(format_f64(value)).build(),
         Err(err) => map_expression_error(tool, &err),
     }
 }
 
 /// Compute the nth-order numerical derivative. `order` must be in `[1, 10]`.
-#[must_use] 
+#[must_use]
 pub fn nth_derivative(expression: &str, variable: &str, point: f64, order: i32) -> String {
     let tool = TOOL_NTH_DERIVATIVE;
     if !(1..=MAX_ORDER).contains(&order) {
@@ -141,7 +183,16 @@ pub fn nth_derivative(expression: &str, variable: &str, point: f64, order: i32) 
             &format!("order={order}"),
         );
     }
+    if let Err(msg) = ensure_defined_at(tool, expression, variable, point) {
+        return msg;
+    }
     match nth_deriv(expression, variable, point, order) {
+        Ok(value) if !value.is_finite() => error_with_detail(
+            tool,
+            ErrorCode::DomainError,
+            "derivative diverges at the evaluation point",
+            &format!("{variable}={point}"),
+        ),
         Ok(value) => Response::ok(tool).result(format_f64(value)).build(),
         Err(err) => map_expression_error(tool, &err),
     }
@@ -172,9 +223,12 @@ pub fn definite_integral(expression: &str, variable: &str, lower: f64, upper: f6
 /// Compute the tangent line to `f(x)` at `point`.
 ///
 /// Emits `SLOPE`, `INTERCEPT`, and `EQUATION` inline fields.
-#[must_use] 
+#[must_use]
 pub fn tangent_line(expression: &str, variable: &str, point: f64) -> String {
     let tool = TOOL_TANGENT_LINE;
+    if let Err(msg) = ensure_defined_at(tool, expression, variable, point) {
+        return msg;
+    }
     let f_at_point = match eval(expression, variable, point) {
         Ok(v) => v,
         Err(err) => return map_expression_error(tool, &err),
@@ -183,6 +237,14 @@ pub fn tangent_line(expression: &str, variable: &str, point: f64) -> String {
         Ok(v) => v,
         Err(err) => return map_expression_error(tool, &err),
     };
+    if !slope.is_finite() {
+        return error_with_detail(
+            tool,
+            ErrorCode::DomainError,
+            "tangent slope diverges at the evaluation point",
+            &format!("{variable}={point}"),
+        );
+    }
     let y_intercept = slope.mul_add(-point, f_at_point);
     let slope_s = format_f64(slope);
     let intercept_s = format_f64(y_intercept);
@@ -400,5 +462,41 @@ mod tests {
             tangent_line("unknown_fn(x)", "x", 0.0),
             "TANGENT_LINE: ERROR\nREASON: [UNKNOWN_FUNCTION] expression calls an unknown function\nDETAIL: name=unknown_fn"
         );
+    }
+
+    #[test]
+    fn derivative_rejects_singularity_at_origin() {
+        // Regression: 1/x at x=0 used to return a huge spurious value
+        // (≈ 1.25e12) because central differences only sample point±h.
+        let out = derivative("1/x", "x", 0.0);
+        assert!(out.contains("DERIVATIVE: ERROR"), "got {out}");
+        assert!(out.contains("DOMAIN_ERROR"), "got {out}");
+        assert!(
+            out.contains("function is not defined at the evaluation point"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn nth_derivative_rejects_singularity() {
+        let out = nth_derivative("1/x", "x", 0.0, 2);
+        assert!(out.contains("NTH_DERIVATIVE: ERROR"), "got {out}");
+        assert!(out.contains("DOMAIN_ERROR"), "got {out}");
+    }
+
+    #[test]
+    fn tangent_line_rejects_singularity() {
+        let out = tangent_line("1/x", "x", 0.0);
+        assert!(out.contains("TANGENT_LINE: ERROR"), "got {out}");
+        assert!(out.contains("DOMAIN_ERROR"), "got {out}");
+    }
+
+    #[test]
+    fn derivative_still_works_near_singularity() {
+        // Smoke-check: 1/x at x=1 is -1, and the guard should not interfere.
+        let out = derivative("1/x", "x", 1.0);
+        assert!(out.starts_with("DERIVATIVE: OK"), "got {out}");
+        let value = extract_result(&out);
+        assert!((value - -1.0).abs() < 1e-5, "value={value}");
     }
 }
