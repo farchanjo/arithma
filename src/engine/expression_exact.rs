@@ -28,6 +28,11 @@ use crate::engine::expression::ExpressionError;
 const EXACT_PRECISION: u64 = 38;
 /// `astro-float` mantissa precision (in bits) used during transcendentals.
 const AF_PRECISION: usize = 192;
+/// Cap on the estimated printed length of an integer-exponent `pow` result.
+/// Mirrors the guard in [`crate::tools::basic::power`] — expressions like
+/// `2^1000000` would otherwise produce a 300k-character payload that exceeds
+/// MCP token limits. The bound `len(base) * exp` is a safe upper estimate.
+const MAX_POWER_RESULT_LEN: u64 = 10_000;
 const DEG_TO_RAD_LITERAL: &str =
     "0.017453292519943295769236907684886127134428718885417254560971914401710091146034";
 
@@ -163,17 +168,35 @@ fn finite_or_domain(
     Ok(())
 }
 
+/// Rejects integer-exponent powers whose printed result would blow past
+/// [`MAX_POWER_RESULT_LEN`]. Zero or `|base| <= 1` short-circuit (the result
+/// stays small regardless of exp), which also avoids false positives on
+/// bases like `1` or `0.1`.
+fn guard_integer_power_size(base: &BigDecimal, exp: u32) -> Result<(), ExpressionError> {
+    if exp == 0 || base.is_zero() {
+        return Ok(());
+    }
+    let base_len = base.to_plain_string().len() as u64;
+    let estimated = base_len.saturating_mul(u64::from(exp));
+    if estimated > MAX_POWER_RESULT_LEN {
+        return Err(ExpressionError::Overflow { op: "^".into() });
+    }
+    Ok(())
+}
+
 /// Exponentiation. Integer exponents stay exact via `BigDecimal::powi`;
 /// negative integers invert the base; fractional or very large integers fall
 /// through to `BigFloat` and round back.
 fn power(base: &BigDecimal, exp: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     if let Some(e) = as_nonneg_u32(exp) {
+        guard_integer_power_size(base, e)?;
         return Ok(base.powi(i64::from(e)));
     }
     if exp.is_integer()
         && exp.is_negative()
         && let Some(abs_e) = exp.abs().to_u32()
     {
+        guard_integer_power_size(base, abs_e)?;
         let positive = base.powi(i64::from(abs_e));
         return divide(&BigDecimal::from(1), &positive);
     }
