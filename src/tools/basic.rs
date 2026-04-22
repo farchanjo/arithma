@@ -103,6 +103,12 @@ pub fn power(base: &str, exponent: &str) -> String {
             );
         }
     };
+    // 0^0 is conventionally 1 (combinatorial identity, IEEE-754, Python,
+    // JavaScript, and most CAS systems). `BigDecimal::powi` returns 0^0=0,
+    // so we short-circuit here to match the accepted convention.
+    if exp == 0 {
+        return ok_result(TOOL_POWER, "1");
+    }
     ok_result(TOOL_POWER, &base_value.powi(i64::from(exp)).to_plain_string())
 }
 
@@ -186,6 +192,15 @@ mod tests {
     #[test]
     fn power_integer_base() {
         assert_eq!(power("2", "10"), "POWER: OK | RESULT: 1024");
+    }
+
+    #[test]
+    fn power_zero_exponent_is_one() {
+        // Regression: previously returned 0 for 0^0. Any finite base with
+        // exponent 0 is 1 by convention.
+        assert_eq!(power("0", "0"), "POWER: OK | RESULT: 1");
+        assert_eq!(power("5", "0"), "POWER: OK | RESULT: 1");
+        assert_eq!(power("-3.14", "0"), "POWER: OK | RESULT: 1");
     }
 
     #[test]
