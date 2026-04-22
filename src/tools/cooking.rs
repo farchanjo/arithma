@@ -7,7 +7,7 @@
 use std::str::FromStr;
 
 use bigdecimal::BigDecimal;
-use num_traits::ToPrimitive;
+use num_traits::{Signed, ToPrimitive};
 
 use crate::engine::bigdecimal_ext::strip_plain;
 use crate::engine::unit_registry::{self, UnitError};
@@ -43,6 +43,19 @@ fn parse_value(tool: &str, raw: &str) -> Result<BigDecimal, String> {
             &format!("value={raw}"),
         )
     })
+}
+
+fn reject_negative(tool: &str, value: &BigDecimal, raw: &str) -> Result<(), String> {
+    if value.is_negative() {
+        Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            "value must not be negative",
+            &format!("value={raw}"),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_allowed(tool: &str, code: &str, allowed: &[&str]) -> Result<(), String> {
@@ -92,6 +105,9 @@ pub fn convert_cooking_volume(value: &str, from_unit: &str, to_unit: &str) -> St
         Ok(v) => v,
         Err(msg) => return msg,
     };
+    if let Err(msg) = reject_negative(TOOL_VOLUME, &parsed, value) {
+        return msg;
+    }
     match unit_registry::convert(&parsed, &from, &dest) {
         Ok(out) => Response::ok(TOOL_VOLUME).result(strip_plain(&out)).build(),
         Err(e) => map_registry_error(TOOL_VOLUME, from_unit, to_unit, &e),
@@ -111,6 +127,9 @@ pub fn convert_cooking_weight(value: &str, from_unit: &str, to_unit: &str) -> St
         Ok(v) => v,
         Err(msg) => return msg,
     };
+    if let Err(msg) = reject_negative(TOOL_WEIGHT, &parsed, value) {
+        return msg;
+    }
     match unit_registry::convert(&parsed, from_unit, to_unit) {
         Ok(out) => Response::ok(TOOL_WEIGHT).result(strip_plain(&out)).build(),
         Err(e) => map_registry_error(TOOL_WEIGHT, from_unit, to_unit, &e),
@@ -277,6 +296,31 @@ mod tests {
         assert_eq!(
             convert_oven_temperature("356", "f", "gasmark"),
             "CONVERT_OVEN_TEMPERATURE: OK | RESULT: 4"
+        );
+    }
+
+    #[test]
+    fn volume_rejects_negative_value() {
+        assert_eq!(
+            convert_cooking_volume("-1", "cup", "ml"),
+            "CONVERT_COOKING_VOLUME: ERROR\nREASON: [INVALID_INPUT] value must not be negative\nDETAIL: value=-1"
+        );
+    }
+
+    #[test]
+    fn weight_rejects_negative_value() {
+        assert_eq!(
+            convert_cooking_weight("-5", "kg", "g"),
+            "CONVERT_COOKING_WEIGHT: ERROR\nREASON: [INVALID_INPUT] value must not be negative\nDETAIL: value=-5"
+        );
+    }
+
+    #[test]
+    fn oven_allows_negative_celsius() {
+        // Temperatures can legitimately be below zero — keep oven converter permissive.
+        assert_eq!(
+            convert_oven_temperature("-10", "c", "f"),
+            "CONVERT_OVEN_TEMPERATURE: OK | RESULT: 14"
         );
     }
 }
