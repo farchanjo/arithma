@@ -7,6 +7,7 @@
 use std::str::FromStr;
 
 use bigdecimal::BigDecimal;
+use num_traits::Signed;
 
 use crate::engine::bigdecimal_ext::strip_plain;
 use crate::engine::unit_registry::{self, UnitCategory, UnitError};
@@ -88,6 +89,24 @@ fn convert_error(tool: &str, from_unit: &str, to_unit: &str, err: &UnitError) ->
     }
 }
 
+fn reject_if_negative(
+    tool: &str,
+    value: &BigDecimal,
+    raw: &str,
+    cat: UnitCategory,
+) -> Result<(), String> {
+    if cat.requires_non_negative() && value.is_negative() {
+        Err(error_with_detail(
+            tool,
+            ErrorCode::InvalidInput,
+            "value must not be negative for this category",
+            &format!("value={raw}, category={}", cat.as_str()),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Convert `value` between two units within an explicit `category`.
 #[must_use]
 pub fn convert(value: &str, from_unit: &str, to_unit: &str, category: &str) -> String {
@@ -105,6 +124,9 @@ pub fn convert(value: &str, from_unit: &str, to_unit: &str, category: &str) -> S
         Ok(v) => v,
         Err(msg) => return msg,
     };
+    if let Err(msg) = reject_if_negative(TOOL_CONVERT, &parsed, value, cat) {
+        return msg;
+    }
     match unit_registry::convert(&parsed, from_unit, to_unit) {
         Ok(out) => Response::ok(TOOL_CONVERT).result(strip_plain(&out)).build(),
         Err(e) => convert_error(TOOL_CONVERT, from_unit, to_unit, &e),
@@ -118,6 +140,12 @@ pub fn convert_auto_detect(value: &str, from_unit: &str, to_unit: &str) -> Strin
         Ok(v) => v,
         Err(msg) => return msg,
     };
+    if let Some(def) = unit_registry::find_unit(from_unit)
+        && let Err(msg) =
+            reject_if_negative(TOOL_CONVERT_AUTO_DETECT, &parsed, value, def.category)
+    {
+        return msg;
+    }
     match unit_registry::convert(&parsed, from_unit, to_unit) {
         Ok(out) => Response::ok(TOOL_CONVERT_AUTO_DETECT)
             .result(strip_plain(&out))
@@ -199,6 +227,54 @@ mod tests {
         assert_eq!(
             convert("not-a-number", "km", "m", "LENGTH"),
             "CONVERT: ERROR\nREASON: [PARSE_ERROR] value is not a valid decimal number\nDETAIL: value=not-a-number"
+        );
+    }
+
+    #[test]
+    fn rejects_negative_length() {
+        assert_eq!(
+            convert("-100", "km", "mi", "LENGTH"),
+            "CONVERT: ERROR\nREASON: [INVALID_INPUT] value must not be negative for this category\nDETAIL: value=-100, category=LENGTH"
+        );
+    }
+
+    #[test]
+    fn rejects_negative_mass() {
+        assert_eq!(
+            convert("-1", "kg", "g", "MASS"),
+            "CONVERT: ERROR\nREASON: [INVALID_INPUT] value must not be negative for this category\nDETAIL: value=-1, category=MASS"
+        );
+    }
+
+    #[test]
+    fn allows_negative_temperature() {
+        assert_eq!(
+            convert("-40", "c", "f", "TEMPERATURE"),
+            "CONVERT: OK | RESULT: -40"
+        );
+    }
+
+    #[test]
+    fn allows_negative_voltage() {
+        assert_eq!(
+            convert("-5", "vlt", "mvlt", "VOLTAGE"),
+            "CONVERT: OK | RESULT: -5000"
+        );
+    }
+
+    #[test]
+    fn auto_detect_rejects_negative_length() {
+        assert_eq!(
+            convert_auto_detect("-10", "km", "mi"),
+            "CONVERT_AUTO_DETECT: ERROR\nREASON: [INVALID_INPUT] value must not be negative for this category\nDETAIL: value=-10, category=LENGTH"
+        );
+    }
+
+    #[test]
+    fn auto_detect_allows_negative_temperature() {
+        assert_eq!(
+            convert_auto_detect("-10", "c", "f"),
+            "CONVERT_AUTO_DETECT: OK | RESULT: 14"
         );
     }
 }

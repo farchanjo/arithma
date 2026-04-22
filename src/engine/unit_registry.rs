@@ -165,6 +165,32 @@ impl UnitCategory {
     pub const fn all() -> &'static [Self] {
         &ALL_CATEGORIES
     }
+
+    /// Returns `true` for categories that model a strictly non-negative
+    /// physical quantity (no meaningful "negative mass" or "negative length").
+    ///
+    /// Signed categories such as `Temperature`, `Speed`, `Energy`, `Force`,
+    /// `Power`, `Pressure` (gauge vs absolute is ambiguous), `Angle`,
+    /// `Voltage`, and `Current` all return `false` — those domains legitimately
+    /// admit negative values (direction, polarity, relative reference).
+    #[must_use]
+    pub const fn requires_non_negative(&self) -> bool {
+        matches!(
+            self,
+            Self::DataStorage
+                | Self::Length
+                | Self::Mass
+                | Self::Volume
+                | Self::Time
+                | Self::Area
+                | Self::Density
+                | Self::Frequency
+                | Self::DataRate
+                | Self::Resistance
+                | Self::Capacitance
+                | Self::Inductance
+        )
+    }
 }
 
 impl std::fmt::Display for UnitCategory {
