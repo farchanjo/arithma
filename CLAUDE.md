@@ -60,13 +60,13 @@ src/
 
 | Document | Purpose | Link |
 |:---|:---|:---|
-| **INDEX.md** | Quick links, common tasks | [docs/INDEX.md](../docs/INDEX.md) |
-| **ARCHITECTURE.md** | System design, module flow, decisions | [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) |
-| **TOOLS.md** | Complete 87-tool reference by category | [docs/TOOLS.md](../docs/TOOLS.md) |
-| **DEVELOPMENT.md** | Building, testing, contributing workflow | [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md) |
-| **API.md** | MCP integration, tool calling, examples | [docs/API.md](../docs/API.md) |
+| **INDEX.md** | Quick links, common tasks | [docs/INDEX.md](./docs/INDEX.md) |
+| **ARCHITECTURE.md** | System design, module flow, decisions | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) |
+| **TOOLS.md** | Complete 87-tool reference by category | [docs/TOOLS.md](./docs/TOOLS.md) |
+| **DEVELOPMENT.md** | Building, testing, contributing workflow | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) |
+| **API.md** | MCP integration, tool calling, examples | [docs/API.md](./docs/API.md) |
 
-Start with [docs/INDEX.md](../docs/INDEX.md) for navigation.
+Start with [docs/INDEX.md](./docs/INDEX.md) for navigation.
 
 ---
 
@@ -250,10 +250,10 @@ Update `Cargo.toml` and tag releases on GitHub.
 
 **Clients**: Claude Code, Claude Desktop, Cursor, Windsurf, OpenCode  
 **Protocol**: JSON-RPC 2.0 over stdio  
-**Tools**: 87 total (see [Tools Catalog](../docs/TOOLS.md))  
+**Tools**: 87 total (see [Tools Catalog](./docs/TOOLS.md))  
 **Parameters**: Decimal numbers as strings (preserve precision)
 
-See [API Usage](../docs/API.md) for integration examples.
+See [API Usage](./docs/API.md) for integration examples.
 
 ---
 
@@ -273,22 +273,22 @@ See [API Usage](../docs/API.md) for integration examples.
 
 ## 📖 Useful References
 
-- [README.md](../README.md) — Project overview, badges, quick start
-- [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — Module design, data flow
-- [docs/TOOLS.md](../docs/TOOLS.md) — Complete tool reference
-- [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md) — Building, testing, contributing
-- [docs/API.md](../docs/API.md) — MCP integration examples
-- [Cargo.toml](../Cargo.toml) — Dependencies, build profiles
-- [rust-toolchain.toml](../rust-toolchain.toml) — Rust version requirement
+- [README.md](./README.md) — Project overview, badges, quick start
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — Module design, data flow
+- [docs/TOOLS.md](./docs/TOOLS.md) — Complete tool reference
+- [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) — Building, testing, contributing
+- [docs/API.md](./docs/API.md) — MCP integration examples
+- [Cargo.toml](./Cargo.toml) — Dependencies, build profiles
+- [rust-toolchain.toml](./rust-toolchain.toml) — Rust version requirement
 
 ---
 
 ## 📞 Questions?
 
-- **Architecture**: See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)
-- **Specific tool**: See [docs/TOOLS.md](../docs/TOOLS.md)
-- **How to integrate**: See [docs/API.md](../docs/API.md)
-- **Contributing**: See [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md)
+- **Architecture**: See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+- **Specific tool**: See [docs/TOOLS.md](./docs/TOOLS.md)
+- **How to integrate**: See [docs/API.md](./docs/API.md)
+- **Contributing**: See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)
 
 ---
 
