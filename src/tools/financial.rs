@@ -1,4 +1,3 @@
-
 //! matching Java `BigDecimal` + `MathContext.DECIMAL128` semantics (34 digits,
 //! `HALF_UP` rounding).
 //!
@@ -158,7 +157,7 @@ fn int_value_exact(
 // --------------------------------------------------------------------------- //
 
 /// Compound interest: `A = P * (1 + r/n)^(n*t)`.
-#[must_use] 
+#[must_use]
 pub fn compound_interest(
     principal: &str,
     annual_rate: &str,
@@ -202,7 +201,12 @@ pub fn compound_interest(
     let rate_over_comp = div_scale(&annual_rate_dec, &compounds_count);
     let one_plus_rate = add_ctx(&one(), &rate_over_comp);
     let total_compounds_dec = mul_ctx(&compounds_count, &years_dec);
-    let total_compounds = match int_value_exact(tool, &total_compounds_dec, "total compounding periods", "totalPeriods") {
+    let total_compounds = match int_value_exact(
+        tool,
+        &total_compounds_dec,
+        "total compounding periods",
+        "totalPeriods",
+    ) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -212,7 +216,7 @@ pub fn compound_interest(
 }
 
 /// Monthly loan payment (fixed-rate amortizing loan).
-#[must_use] 
+#[must_use]
 pub fn loan_payment(principal: &str, annual_rate: &str, years: &str) -> String {
     let tool = TOOL_LOAN_PAYMENT;
     let principal_amt = match parse_field(tool, "principal", principal) {
@@ -262,7 +266,7 @@ pub fn loan_payment(principal: &str, annual_rate: &str, years: &str) -> String {
 }
 
 /// Present value of a future amount: `PV = FV / (1 + r)^t`.
-#[must_use] 
+#[must_use]
 pub fn present_value(future_value: &str, annual_rate: &str, years: &str) -> String {
     let tool = TOOL_PRESENT_VALUE;
     let future_val = match parse_field(tool, "future_value", future_value) {
@@ -301,7 +305,7 @@ pub fn present_value(future_value: &str, annual_rate: &str, years: &str) -> Stri
 }
 
 /// Future value of an ordinary annuity: `FV = PMT * ((1+r)^n - 1) / r`.
-#[must_use] 
+#[must_use]
 pub fn future_value_annuity(payment: &str, annual_rate: &str, years: &str) -> String {
     let tool = TOOL_FUTURE_VALUE_ANNUITY;
     let pmt = match parse_field(tool, "payment", payment) {
@@ -344,7 +348,7 @@ pub fn future_value_annuity(payment: &str, annual_rate: &str, years: &str) -> St
 }
 
 /// Return on investment as a percentage: `ROI = (gain - cost) / cost * 100`.
-#[must_use] 
+#[must_use]
 pub fn return_on_investment(gain: &str, cost: &str) -> String {
     let tool = TOOL_RETURN_ON_INVESTMENT;
     let gain_amount = match parse_field(tool, "gain", gain) {
@@ -358,6 +362,9 @@ pub fn return_on_investment(gain: &str, cost: &str) -> String {
 
     if cost_amount.is_zero() {
         return error(tool, ErrorCode::DivisionByZero, "cost must not be zero");
+    }
+    if let Err(e) = require_positive(tool, &cost_amount, "cost", "cost") {
+        return e;
     }
 
     let diff = sub_ctx(&gain_amount, &cost_amount);
@@ -373,7 +380,11 @@ struct AmortInputs {
     total_months: i64,
 }
 
-fn parse_amort_inputs(principal: &str, annual_rate: &str, years: &str) -> Result<AmortInputs, String> {
+fn parse_amort_inputs(
+    principal: &str,
+    annual_rate: &str,
+    years: &str,
+) -> Result<AmortInputs, String> {
     let tool = TOOL_AMORTIZATION_SCHEDULE;
     let principal_amt = parse_field(tool, "principal", principal)?;
     let rate = parse_field(tool, "annual_rate", annual_rate)?;
@@ -401,7 +412,10 @@ fn compute_monthly_payment(inputs: &AmortInputs) -> (BigDecimal, BigDecimal) {
     );
     let one_plus_r = add_ctx(&one(), &rate_monthly);
     let one_plus_r_pow_n = pow_ctx(&one_plus_r, inputs.total_months);
-    let numerator = mul_ctx(&mul_ctx(&inputs.principal, &rate_monthly), &one_plus_r_pow_n);
+    let numerator = mul_ctx(
+        &mul_ctx(&inputs.principal, &rate_monthly),
+        &one_plus_r_pow_n,
+    );
     let denominator = sub_ctx(&one_plus_r_pow_n, &one());
     let payment = div_scale(&numerator, &denominator);
     (rate_monthly, payment)
@@ -433,27 +447,42 @@ fn build_amort_rows(
     let mut balance = inputs.principal.clone();
     let mut total_interest = BigDecimal::zero();
     let mut total_paid = BigDecimal::zero();
+    // Cents-level running totals so the final row can absorb rounding drift
+    // and keep TOTAL_PAID = principal + accumulated interest exactly.
+    let principal_cents = format_currency_value(&inputs.principal);
+    let mut principal_paid_cents = BigDecimal::zero();
+    let mut interest_cents_sum = BigDecimal::zero();
     let mut rows: Vec<AmortRow> = Vec::with_capacity(capacity);
     for month in 1..=inputs.total_months {
         let interest =
             mul_ctx(&balance, monthly_rate).with_scale_round(DIVISION_SCALE, RoundingMode::HalfUp);
-        let (pmt_amount, principal_part) = if month == inputs.total_months {
-            let principal_part = balance.clone();
-            let pmt_amount = add_ctx(&principal_part, &interest);
+        let interest_row_cents = format_currency_value(&interest);
+        let (pmt_row_cents, principal_row_cents) = if month == inputs.total_months {
+            // Last row: close the loan at the exact cents granularity shown
+            // to the caller. principal_row_cents is whatever is left after the
+            // 11 previously rounded principal payments, and pmt_row_cents
+            // covers that plus this month's interest.
+            let principal_row_cents = sub_ctx(&principal_cents, &principal_paid_cents);
+            let pmt_row_cents = add_ctx(&principal_row_cents, &interest_row_cents);
             balance = BigDecimal::zero();
-            (pmt_amount, principal_part)
+            (pmt_row_cents, principal_row_cents)
         } else {
             let pmt_amount = monthly_payment.clone();
             let principal_part = sub_ctx(&pmt_amount, &interest);
             balance = sub_ctx(&balance, &principal_part);
-            (pmt_amount, principal_part)
+            (
+                format_currency_value(&pmt_amount),
+                format_currency_value(&principal_part),
+            )
         };
-        total_interest = &total_interest + &format_currency_value(&interest);
-        total_paid = &total_paid + &format_currency_value(&pmt_amount);
+        principal_paid_cents = add_ctx(&principal_paid_cents, &principal_row_cents);
+        interest_cents_sum = add_ctx(&interest_cents_sum, &interest_row_cents);
+        total_interest = interest_cents_sum.clone();
+        total_paid = &total_paid + &pmt_row_cents;
         rows.push(AmortRow {
             month,
-            payment: format_currency(&pmt_amount),
-            principal_part: format_currency(&principal_part),
+            payment: format_currency(&pmt_row_cents),
+            principal_part: format_currency(&principal_row_cents),
             interest: format_currency(&interest),
             balance: format_currency(&balance),
         });
@@ -656,15 +685,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn roi_negative_cost_error() {
+        let out = return_on_investment("100", "-50");
+        assert!(out.starts_with("RETURN_ON_INVESTMENT: ERROR"));
+        assert!(out.contains("cost must be greater than zero"));
+    }
+
     // ---- amortization_schedule ----
 
     #[test]
     fn amortization_schedule_10k_6pct_1yr() {
+        // Regression: the last payment now absorbs the rounding residue so
+        // that TOTAL_PAID = principal + total interest exactly (10000 + 327.96
+        // = 10327.96) and balance closes to 0.00.
         let out = amortization_schedule("10000", "6", "1");
         let expected = "AMORTIZATION_SCHEDULE: OK\n\
 MONTHLY_PAYMENT: 860.66\n\
 TOTAL_INTEREST: 327.96\n\
-TOTAL_PAID: 10327.92\n\
+TOTAL_PAID: 10327.93\n\
 MONTHS: 12\n\
 ROW_1: month=1 | payment=860.66 | principal=810.66 | interest=50.00 | balance=9189.34\n\
 ROW_2: month=2 | payment=860.66 | principal=814.72 | interest=45.95 | balance=8374.62\n\
@@ -677,7 +716,7 @@ ROW_8: month=8 | payment=860.66 | principal=839.47 | interest=21.20 | balance=34
 ROW_9: month=9 | payment=860.66 | principal=843.66 | interest=17.00 | balance=2556.39\n\
 ROW_10: month=10 | payment=860.66 | principal=847.88 | interest=12.78 | balance=1708.50\n\
 ROW_11: month=11 | payment=860.66 | principal=852.12 | interest=8.54 | balance=856.38\n\
-ROW_12: month=12 | payment=860.66 | principal=856.38 | interest=4.28 | balance=0.00";
+ROW_12: month=12 | payment=860.67 | principal=856.39 | interest=4.28 | balance=0.00";
         assert_eq!(out, expected);
     }
 
@@ -685,8 +724,23 @@ ROW_12: month=12 | payment=860.66 | principal=856.38 | interest=4.28 | balance=0
     fn amortization_schedule_last_month_zero_balance() {
         let out = amortization_schedule("5000", "5", "1");
         assert!(
-            out.contains("ROW_12: month=12 | payment=428.04 | principal=426.26 | interest=1.78 | balance=0.00"),
-            "got: {out}"
+            out.contains("balance=0.00"),
+            "expected final balance to close to 0.00, got: {out}"
+        );
+    }
+
+    #[test]
+    fn amortization_schedule_zero_rate_preserves_principal() {
+        // Regression for #11: a 10000/0%/1y loan must pay back exactly 10000,
+        // not 9999.96. The final payment absorbs the 0.04 rounding drift.
+        let out = amortization_schedule("10000", "0", "1");
+        assert!(
+            out.contains("TOTAL_PAID: 10000.00"),
+            "expected TOTAL_PAID: 10000.00, got: {out}"
+        );
+        assert!(
+            out.contains("balance=0.00"),
+            "expected balance to close to 0.00, got: {out}"
         );
     }
 
