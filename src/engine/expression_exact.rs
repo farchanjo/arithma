@@ -122,6 +122,23 @@ fn as_nonneg_u32(exp: &BigDecimal) -> Option<u32> {
     exp.to_u32()
 }
 
+/// Reject astro-float results that leaked NaN / ±Inf — those mean the operand
+/// left the transcendental's real-valued domain (e.g. `log(0)`, `sqrt(-2)`).
+/// Without this guard, `bf_to_bd` would silently turn them into `0`.
+fn finite_or_domain(
+    bf: &BigFloat,
+    op: &str,
+    value: &BigDecimal,
+) -> Result<(), ExpressionError> {
+    if bf.is_nan() || bf.is_inf() {
+        return Err(ExpressionError::DomainError {
+            op: op.to_string(),
+            value: value.to_plain_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Exponentiation. Integer exponents stay exact via `BigDecimal::powi`;
 /// negative integers invert the base; fractional or very large integers fall
 /// through to BigFloat and round back.
@@ -139,6 +156,12 @@ fn power(base: &BigDecimal, exp: &BigDecimal, consts: &mut Consts) -> Result<Big
     let base_bf = bd_to_bf(base, consts);
     let exp_bf = bd_to_bf(exp, consts);
     let out = base_bf.pow(&exp_bf, AF_PRECISION, AfRm::ToEven, consts);
+    if out.is_nan() || out.is_inf() {
+        return Err(ExpressionError::DomainError {
+            op: "pow".into(),
+            value: format!("{}^{}", base.to_plain_string(), exp.to_plain_string()),
+        });
+    }
     Ok(bf_to_bd(&out, consts))
 }
 
@@ -150,40 +173,46 @@ fn floor(value: &BigDecimal) -> BigDecimal {
     value.with_scale_round(0, BdRm::Floor)
 }
 
-fn sqrt_bd(value: &BigDecimal, consts: &mut Consts) -> BigDecimal {
+fn sqrt_bd(value: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let bf = bd_to_bf(value, consts);
     let out = bf.sqrt(AF_PRECISION, AfRm::ToEven);
-    bf_to_bd(&out, consts)
+    finite_or_domain(&out, "sqrt", value)?;
+    Ok(bf_to_bd(&out, consts))
 }
 
-fn ln_bd(value: &BigDecimal, consts: &mut Consts) -> BigDecimal {
+fn ln_bd(value: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let bf = bd_to_bf(value, consts);
     let out = bf.ln(AF_PRECISION, AfRm::ToEven, consts);
-    bf_to_bd(&out, consts)
+    finite_or_domain(&out, "log", value)?;
+    Ok(bf_to_bd(&out, consts))
 }
 
-fn log10_bd(value: &BigDecimal, consts: &mut Consts) -> BigDecimal {
+fn log10_bd(value: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let bf = bd_to_bf(value, consts);
     let out = bf.log10(AF_PRECISION, AfRm::ToEven, consts);
-    bf_to_bd(&out, consts)
+    finite_or_domain(&out, "log10", value)?;
+    Ok(bf_to_bd(&out, consts))
 }
 
-fn sin_bd(degrees: &BigDecimal, consts: &mut Consts) -> BigDecimal {
+fn sin_bd(degrees: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let rad = to_radians(degrees, consts);
     let out = rad.sin(AF_PRECISION, AfRm::ToEven, consts);
-    bf_to_bd(&out, consts)
+    finite_or_domain(&out, "sin", degrees)?;
+    Ok(bf_to_bd(&out, consts))
 }
 
-fn cos_bd(degrees: &BigDecimal, consts: &mut Consts) -> BigDecimal {
+fn cos_bd(degrees: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let rad = to_radians(degrees, consts);
     let out = rad.cos(AF_PRECISION, AfRm::ToEven, consts);
-    bf_to_bd(&out, consts)
+    finite_or_domain(&out, "cos", degrees)?;
+    Ok(bf_to_bd(&out, consts))
 }
 
-fn tan_bd(degrees: &BigDecimal, consts: &mut Consts) -> BigDecimal {
+fn tan_bd(degrees: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let rad = to_radians(degrees, consts);
     let out = rad.tan(AF_PRECISION, AfRm::ToEven, consts);
-    bf_to_bd(&out, consts)
+    finite_or_domain(&out, "tan", degrees)?;
+    Ok(bf_to_bd(&out, consts))
 }
 
 // --------------------------------------------------------------------------- //
@@ -358,12 +387,12 @@ impl<'a, 'c> Parser<'a, 'c> {
         arg: BigDecimal,
     ) -> Result<BigDecimal, ExpressionError> {
         match name {
-            "sin" => Ok(sin_bd(&arg, self.consts)),
-            "cos" => Ok(cos_bd(&arg, self.consts)),
-            "tan" => Ok(tan_bd(&arg, self.consts)),
-            "log" => Ok(ln_bd(&arg, self.consts)),
-            "log10" => Ok(log10_bd(&arg, self.consts)),
-            "sqrt" => Ok(sqrt_bd(&arg, self.consts)),
+            "sin" => sin_bd(&arg, self.consts),
+            "cos" => cos_bd(&arg, self.consts),
+            "tan" => tan_bd(&arg, self.consts),
+            "log" => ln_bd(&arg, self.consts),
+            "log10" => log10_bd(&arg, self.consts),
+            "sqrt" => sqrt_bd(&arg, self.consts),
             "abs" => Ok(arg.abs()),
             "ceil" => Ok(ceil(&arg)),
             "floor" => Ok(floor(&arg)),
@@ -469,5 +498,59 @@ mod tests {
             evaluate("foo(1)").unwrap_err(),
             ExpressionError::UnknownFunction("foo".into())
         );
+    }
+
+    #[test]
+    fn sqrt_of_negative_is_domain_error() {
+        // Before the finite-or-domain guard this silently returned "0".
+        match evaluate("sqrt(-2)").unwrap_err() {
+            ExpressionError::DomainError { op, value } => {
+                assert_eq!(op, "sqrt");
+                assert_eq!(value, "-2");
+            }
+            other => panic!("expected DomainError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_of_zero_is_domain_error() {
+        match evaluate("log(0)").unwrap_err() {
+            ExpressionError::DomainError { op, value } => {
+                assert_eq!(op, "log");
+                assert_eq!(value, "0");
+            }
+            other => panic!("expected DomainError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_of_negative_is_domain_error() {
+        match evaluate("log(-1)").unwrap_err() {
+            ExpressionError::DomainError { op, value } => {
+                assert_eq!(op, "log");
+                assert_eq!(value, "-1");
+            }
+            other => panic!("expected DomainError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log10_of_zero_is_domain_error() {
+        match evaluate("log10(0)").unwrap_err() {
+            ExpressionError::DomainError { op, value } => {
+                assert_eq!(op, "log10");
+                assert_eq!(value, "0");
+            }
+            other => panic!("expected DomainError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_domain_error_propagates() {
+        // The outer addition should still surface the inner sqrt(-1) failure.
+        assert!(matches!(
+            evaluate("1 + sqrt(-1)").unwrap_err(),
+            ExpressionError::DomainError { .. }
+        ));
     }
 }

@@ -58,6 +58,16 @@ pub enum ExpressionError {
     /// `f64` evaluator yields IEEE ±Inf or NaN and never emits this variant).
     #[error("Division by zero")]
     DivisionByZero,
+    /// A transcendental evaluated outside its real-valued domain (e.g.
+    /// `sqrt(-1)`, `log(0)`, `log(-x)`). Exact-precision evaluator only — the
+    /// `f64` evaluator surfaces NaN / −Inf through IEEE and never emits this.
+    #[error("Domain error in {op}: value={value}")]
+    DomainError {
+        /// Operation name (`sqrt`, `log`, `log10`, `pow`, `tan`, …).
+        op: String,
+        /// String representation of the offending input.
+        value: String,
+    },
 }
 
 /// Evaluates a mathematical expression without variables.

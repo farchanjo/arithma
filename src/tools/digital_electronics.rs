@@ -165,6 +165,23 @@ fn encode_to_twos(value: &str, bits: u32) -> String {
             );
         }
     };
+    // Reject values outside the signed range; the old implementation silently
+    // truncated via `value & mask`, so `toTwos(1024, bits=8)` returned
+    // `00000000` instead of an error.
+    let max: BigInt = (BigInt::one() << (bits - 1)) - BigInt::one();
+    let min: BigInt = -(BigInt::one() << (bits - 1));
+    if parsed > max || parsed < min {
+        return error_with_detail(
+            TWOS_COMPLEMENT,
+            ErrorCode::OutOfRange,
+            &format!("value is outside the {bits}-bit signed range"),
+            &format!(
+                "value={value}, min={}, max={}",
+                min.to_str_radix(10),
+                max.to_str_radix(10)
+            ),
+        );
+    }
     let mask: BigInt = (BigInt::one() << bits) - BigInt::one();
     let twos = parsed & mask;
     let encoded = pad_binary(&twos.to_str_radix(2), bits as usize);
@@ -531,6 +548,36 @@ mod tests {
         assert_eq!(
             twos_complement("5", 8, "toward"),
             "TWOS_COMPLEMENT: ERROR\nREASON: [INVALID_INPUT] direction must be 'toTwos' or 'fromTwos'\nDETAIL: direction=toward"
+        );
+    }
+
+    #[test]
+    fn twos_complement_value_above_signed_range_errors() {
+        // 1024 does not fit in a signed 8-bit integer (max 127). The original
+        // implementation silently masked and returned "00000000".
+        assert_eq!(
+            twos_complement("1024", 8, "toTwos"),
+            "TWOS_COMPLEMENT: ERROR\nREASON: [OUT_OF_RANGE] value is outside the 8-bit signed range\nDETAIL: value=1024, min=-128, max=127"
+        );
+    }
+
+    #[test]
+    fn twos_complement_value_below_signed_range_errors() {
+        assert_eq!(
+            twos_complement("-129", 8, "toTwos"),
+            "TWOS_COMPLEMENT: ERROR\nREASON: [OUT_OF_RANGE] value is outside the 8-bit signed range\nDETAIL: value=-129, min=-128, max=127"
+        );
+    }
+
+    #[test]
+    fn twos_complement_boundary_values_accepted() {
+        assert_eq!(
+            twos_complement("127", 8, "toTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: 01111111"
+        );
+        assert_eq!(
+            twos_complement("-128", 8, "toTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: 10000000"
         );
     }
 

@@ -304,7 +304,7 @@ def test_scientific(r: TestRunner) -> None:
 
 
 def test_programmable(r: TestRunner) -> None:
-    r.category("programmable", 4)
+    r.category("programmable", 6)
     c = r.client.call
     r.check("evaluate", "2+3*4", c("evaluate", {"expression": "2+3*4"}),
             lambda v: TestRunner.close(envelope_result(v, "EVALUATE"), 14.0, 1e-9))
@@ -321,6 +321,16 @@ def test_programmable(r: TestRunner) -> None:
                "variables": '{"pi":"3.1415926535897932384626433"}'}),
             lambda v: envelope_result(v, "EVALUATE_EXACT_WITH_VARIABLES")
                       == "6.2831853071795864769252866")
+    # Regression: exact evaluator must surface DOMAIN_ERROR instead of silently
+    # returning 0 when a transcendental leaves its real-valued domain.
+    r.check("evaluateExact", "sqrt(-2) -> DOMAIN_ERROR",
+            c("evaluateExact", {"expression": "sqrt(-2)"}),
+            lambda v: envelope_error(v, "EVALUATE_EXACT", "DOMAIN_ERROR")
+                      and envelope_field(v, "DETAIL") == "op=sqrt, value=-2")
+    r.check("evaluateExact", "log(0) -> DOMAIN_ERROR",
+            c("evaluateExact", {"expression": "log(0)"}),
+            lambda v: envelope_error(v, "EVALUATE_EXACT", "DOMAIN_ERROR")
+                      and envelope_field(v, "DETAIL") == "op=log, value=0")
 
 
 def test_vector(r: TestRunner) -> None:
@@ -371,11 +381,17 @@ def test_financial(r: TestRunner) -> None:
 
 
 def test_calculus(r: TestRunner) -> None:
-    r.category("calculus", 4)
+    r.category("calculus", 5)
     c = r.client.call
     r.check("derivative", "x^2 at 3", c("derivative", {
         "expression": "x^2", "variable": "x", "point": 3.0
     }), lambda v: TestRunner.close(envelope_result(v, "DERIVATIVE"), 6.0, 1e-4))
+    # Regression: calculus error envelopes must match the normalized format
+    # used by programmable (lowercase reason + DETAIL line).
+    r.check("derivative", "unknown var -> normalized envelope",
+            c("derivative", {"expression": "y + 1", "variable": "x", "point": 0.0}),
+            lambda v: envelope_error(v, "DERIVATIVE", "UNKNOWN_VARIABLE")
+                      and envelope_field(v, "DETAIL") == "name=y")
     r.check("nthDerivative", "x^3 n=2 at 2", c("nthDerivative", {
         "expression": "x^3", "variable": "x", "point": 2.0, "order": 2
     }), lambda v: TestRunner.close(envelope_result(v, "NTH_DERIVATIVE"), 12.0, 1e-2))
@@ -706,7 +722,7 @@ def test_analog(r: TestRunner) -> None:
 
 
 def test_digital(r: TestRunner) -> None:
-    r.category("digital electronics", 10)
+    r.category("digital electronics", 11)
     c = r.client.call
 
     r.check("convertBase", "255 dec->hex", c("convertBase", {
@@ -716,6 +732,12 @@ def test_digital(r: TestRunner) -> None:
     r.check("twosComplement", "-5 8-bit", c("twosComplement", {
         "value": "-5", "bits": 8, "direction": "toTwos"
     }), lambda v: envelope_result(v, "TWOS_COMPLEMENT") == "11111011")
+    # Regression: values outside the signed range must surface OUT_OF_RANGE
+    # instead of silently wrapping via bitmask (used to return 00000000).
+    r.check("twosComplement", "1024 8-bit -> OUT_OF_RANGE",
+            c("twosComplement", {"value": "1024", "bits": 8, "direction": "toTwos"}),
+            lambda v: envelope_error(v, "TWOS_COMPLEMENT", "OUT_OF_RANGE")
+                      and envelope_field(v, "DETAIL") == "value=1024, min=-128, max=127")
 
     r.check("grayCode", "1010 toGray", c("grayCode", {
         "value": "1010", "direction": "toGray"

@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::engine::expression::{
-    ExpressionError, evaluate as engine_evaluate,
-    evaluate_with_variables as engine_evaluate_with_variables,
+    evaluate as engine_evaluate, evaluate_with_variables as engine_evaluate_with_variables,
 };
 use crate::engine::expression_exact;
-use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+use crate::mcp::message::{
+    ErrorCode, Response, error_with_detail, expression_error_envelope,
+};
 
 const TOOL_EVALUATE: &str = "EVALUATE";
 const TOOL_EVALUATE_WITH_VARIABLES: &str = "EVALUATE_WITH_VARIABLES";
@@ -18,53 +19,6 @@ const TOOL_EVALUATE_EXACT: &str = "EVALUATE_EXACT";
 const TOOL_EVALUATE_EXACT_WITH_VARIABLES: &str = "EVALUATE_EXACT_WITH_VARIABLES";
 
 const JSON_DETAIL_MAX: usize = 120;
-
-/// Map an `ExpressionError` to its tool-scoped envelope. Each variant maps to
-/// the error code defined by the shared convention.
-fn expression_error_envelope(tool: &str, err: &ExpressionError) -> String {
-    let (code, reason, detail): (ErrorCode, &str, Option<String>) = match err {
-        ExpressionError::Empty => (ErrorCode::InvalidInput, "expression must not be blank", None),
-        ExpressionError::UnexpectedChar { pos, ch } => (
-            ErrorCode::ParseError,
-            "unexpected character in expression",
-            Some(format!("pos={pos}, char={ch}")),
-        ),
-        ExpressionError::UnexpectedEnd => (
-            ErrorCode::ParseError,
-            "unexpected end of expression",
-            None,
-        ),
-        ExpressionError::InvalidNumber(token) => (
-            ErrorCode::ParseError,
-            "invalid number literal",
-            Some(format!("token={token}")),
-        ),
-        ExpressionError::UnknownVariable(name) => (
-            ErrorCode::UnknownVariable,
-            "expression references an unknown variable",
-            Some(format!("name={name}")),
-        ),
-        ExpressionError::UnknownFunction(name) => (
-            ErrorCode::UnknownFunction,
-            "expression calls an unknown function",
-            Some(format!("name={name}")),
-        ),
-        ExpressionError::ExpectedCloseParen { pos } => (
-            ErrorCode::ParseError,
-            "missing closing parenthesis",
-            Some(format!("pos={pos}")),
-        ),
-        ExpressionError::DivisionByZero => (
-            ErrorCode::DivisionByZero,
-            "cannot divide or take modulo by zero",
-            None,
-        ),
-    };
-    match detail {
-        Some(d) => error_with_detail(tool, code, reason, &d),
-        None => error(tool, code, reason),
-    }
-}
 
 fn ok_result(tool: &str, value: String) -> String {
     Response::ok(tool).result(value).build()
@@ -346,6 +300,40 @@ mod tests {
         assert_eq!(
             evaluate_exact("bogus(1)"),
             "EVALUATE_EXACT: ERROR\nREASON: [UNKNOWN_FUNCTION] expression calls an unknown function\nDETAIL: name=bogus"
+        );
+    }
+
+    #[test]
+    fn evaluate_exact_sqrt_of_negative_is_domain_error() {
+        // Regression: previously returned `OK | RESULT: 0` because astro-float
+        // NaN was silently mapped to zero.
+        assert_eq!(
+            evaluate_exact("sqrt(-2)"),
+            "EVALUATE_EXACT: ERROR\nREASON: [DOMAIN_ERROR] operation is undefined for this input\nDETAIL: op=sqrt, value=-2"
+        );
+    }
+
+    #[test]
+    fn evaluate_exact_log_of_zero_is_domain_error() {
+        assert_eq!(
+            evaluate_exact("log(0)"),
+            "EVALUATE_EXACT: ERROR\nREASON: [DOMAIN_ERROR] operation is undefined for this input\nDETAIL: op=log, value=0"
+        );
+    }
+
+    #[test]
+    fn evaluate_exact_log_of_negative_is_domain_error() {
+        assert_eq!(
+            evaluate_exact("log(-1)"),
+            "EVALUATE_EXACT: ERROR\nREASON: [DOMAIN_ERROR] operation is undefined for this input\nDETAIL: op=log, value=-1"
+        );
+    }
+
+    #[test]
+    fn evaluate_exact_log10_of_zero_is_domain_error() {
+        assert_eq!(
+            evaluate_exact("log10(0)"),
+            "EVALUATE_EXACT: ERROR\nREASON: [DOMAIN_ERROR] operation is undefined for this input\nDETAIL: op=log10, value=0"
         );
     }
 

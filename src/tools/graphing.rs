@@ -12,7 +12,9 @@ use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive};
 
 use crate::engine::bigdecimal_ext::DECIMAL128_PRECISION;
 use crate::engine::expression::{ExpressionError, evaluate_with_variables};
-use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+use crate::mcp::message::{
+    ErrorCode, Response, error_with_detail, expression_error_envelope,
+};
 
 const TOOL_PLOT_FUNCTION: &str = "PLOT_FUNCTION";
 const TOOL_SOLVE_EQUATION: &str = "SOLVE_EQUATION";
@@ -24,19 +26,10 @@ const DERIVATIVE_STEP: f64 = 1e-8;
 const BISECT_ITERS: i32 = 50;
 const SCAN_DIVISIONS: i32 = 1000;
 
-/// Map an [`ExpressionError`] into the canonical error envelope.
+/// Map an [`ExpressionError`] into the canonical envelope — delegates to the
+/// shared helper so REASON text and DETAIL shape stay consistent.
 fn map_expression_error(tool: &str, err: &ExpressionError) -> String {
-    let reason = err.to_string();
-    match err {
-        ExpressionError::Empty => error(tool, ErrorCode::InvalidInput, &reason),
-        ExpressionError::UnexpectedChar { .. }
-        | ExpressionError::UnexpectedEnd
-        | ExpressionError::InvalidNumber(_)
-        | ExpressionError::ExpectedCloseParen { .. } => error(tool, ErrorCode::ParseError, &reason),
-        ExpressionError::UnknownVariable(_) => error(tool, ErrorCode::UnknownVariable, &reason),
-        ExpressionError::UnknownFunction(_) => error(tool, ErrorCode::UnknownFunction, &reason),
-        ExpressionError::DivisionByZero => error(tool, ErrorCode::DivisionByZero, &reason),
-    }
+    expression_error_envelope(tool, err)
 }
 
 fn eval_at(
@@ -328,7 +321,7 @@ ROW_5: x=2.0 | y=4.0";
     fn plot_bubbles_unknown_variable() {
         assert_eq!(
             plot_function("unknown_var", "x", 0.0, 1.0, 2),
-            "PLOT_FUNCTION: ERROR\nREASON: [UNKNOWN_VARIABLE] Unknown variable: unknown_var"
+            "PLOT_FUNCTION: ERROR\nREASON: [UNKNOWN_VARIABLE] expression references an unknown variable\nDETAIL: name=unknown_var"
         );
     }
 
@@ -360,7 +353,7 @@ ROW_5: x=2.0 | y=4.0";
     fn solve_bubbles_unknown_variable() {
         assert_eq!(
             solve_equation("bogus_var", "x", 1.0),
-            "SOLVE_EQUATION: ERROR\nREASON: [UNKNOWN_VARIABLE] Unknown variable: bogus_var"
+            "SOLVE_EQUATION: ERROR\nREASON: [UNKNOWN_VARIABLE] expression references an unknown variable\nDETAIL: name=bogus_var"
         );
     }
 
@@ -392,7 +385,7 @@ ROW_5: x=2.0 | y=4.0";
     fn find_roots_bubbles_unknown_variable() {
         assert_eq!(
             find_roots("bogus_var", "x", -1.0, 1.0),
-            "FIND_ROOTS: ERROR\nREASON: [UNKNOWN_VARIABLE] Unknown variable: bogus_var"
+            "FIND_ROOTS: ERROR\nREASON: [UNKNOWN_VARIABLE] expression references an unknown variable\nDETAIL: name=bogus_var"
         );
     }
 

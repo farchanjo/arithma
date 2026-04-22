@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 
 use crate::engine::expression::{ExpressionError, evaluate_with_variables};
-use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+use crate::mcp::message::{
+    ErrorCode, Response, error_with_detail, expression_error_envelope,
+};
 
 const TOOL_DERIVATIVE: &str = "DERIVATIVE";
 const TOOL_NTH_DERIVATIVE: &str = "NTH_DERIVATIVE";
@@ -38,19 +40,11 @@ fn eval(expression: &str, variable: &str, value: f64) -> Result<f64, ExpressionE
     evaluate_with_variables(expression, &vars)
 }
 
-/// Map an [`ExpressionError`] into the canonical error envelope.
+/// Map an [`ExpressionError`] into the canonical envelope — delegates to the
+/// shared helper so the REASON text stays consistent across every tool that
+/// wraps the expression evaluator.
 fn map_expression_error(tool: &str, err: &ExpressionError) -> String {
-    let reason = err.to_string();
-    match err {
-        ExpressionError::Empty => error(tool, ErrorCode::InvalidInput, &reason),
-        ExpressionError::UnexpectedChar { .. }
-        | ExpressionError::UnexpectedEnd
-        | ExpressionError::InvalidNumber(_)
-        | ExpressionError::ExpectedCloseParen { .. } => error(tool, ErrorCode::ParseError, &reason),
-        ExpressionError::UnknownVariable(_) => error(tool, ErrorCode::UnknownVariable, &reason),
-        ExpressionError::UnknownFunction(_) => error(tool, ErrorCode::UnknownFunction, &reason),
-        ExpressionError::DivisionByZero => error(tool, ErrorCode::DivisionByZero, &reason),
-    }
+    expression_error_envelope(tool, err)
 }
 
 /// Five-point central difference: `f'(x) ≈ (-f(x+2h) + 8f(x+h) - 8f(x-h) + f(x-2h)) / (12h)`.
@@ -223,7 +217,7 @@ mod tests {
     fn derivative_invalid_expression_parse_error() {
         assert_eq!(
             derivative("1+", "x", 0.0),
-            "DERIVATIVE: ERROR\nREASON: [PARSE_ERROR] Unexpected end of expression"
+            "DERIVATIVE: ERROR\nREASON: [PARSE_ERROR] unexpected end of expression"
         );
     }
 
@@ -231,7 +225,7 @@ mod tests {
     fn derivative_empty_expression() {
         assert_eq!(
             derivative("", "x", 0.0),
-            "DERIVATIVE: ERROR\nREASON: [INVALID_INPUT] Expression must not be null or blank"
+            "DERIVATIVE: ERROR\nREASON: [INVALID_INPUT] expression must not be blank"
         );
     }
 
@@ -239,7 +233,7 @@ mod tests {
     fn derivative_unknown_variable() {
         assert_eq!(
             derivative("y + 1", "x", 0.0),
-            "DERIVATIVE: ERROR\nREASON: [UNKNOWN_VARIABLE] Unknown variable: y"
+            "DERIVATIVE: ERROR\nREASON: [UNKNOWN_VARIABLE] expression references an unknown variable\nDETAIL: name=y"
         );
     }
 
@@ -247,7 +241,7 @@ mod tests {
     fn derivative_unknown_function() {
         assert_eq!(
             derivative("bogus(x)", "x", 0.0),
-            "DERIVATIVE: ERROR\nREASON: [UNKNOWN_FUNCTION] Unknown function: bogus"
+            "DERIVATIVE: ERROR\nREASON: [UNKNOWN_FUNCTION] expression calls an unknown function\nDETAIL: name=bogus"
         );
     }
 
@@ -298,7 +292,7 @@ mod tests {
     fn nth_derivative_bubbles_parse_error() {
         assert_eq!(
             nth_derivative("1+", "x", 0.0, 2),
-            "NTH_DERIVATIVE: ERROR\nREASON: [PARSE_ERROR] Unexpected end of expression"
+            "NTH_DERIVATIVE: ERROR\nREASON: [PARSE_ERROR] unexpected end of expression"
         );
     }
 
@@ -330,7 +324,7 @@ mod tests {
     fn integral_invalid_expression() {
         assert_eq!(
             definite_integral("bogus(x)", "x", 0.0, 1.0),
-            "DEFINITE_INTEGRAL: ERROR\nREASON: [UNKNOWN_FUNCTION] Unknown function: bogus"
+            "DEFINITE_INTEGRAL: ERROR\nREASON: [UNKNOWN_FUNCTION] expression calls an unknown function\nDETAIL: name=bogus"
         );
     }
 
@@ -370,7 +364,7 @@ mod tests {
     fn tangent_line_invalid_expression() {
         assert_eq!(
             tangent_line("unknown_fn(x)", "x", 0.0),
-            "TANGENT_LINE: ERROR\nREASON: [UNKNOWN_FUNCTION] Unknown function: unknown_fn"
+            "TANGENT_LINE: ERROR\nREASON: [UNKNOWN_FUNCTION] expression calls an unknown function\nDETAIL: name=unknown_fn"
         );
     }
 }

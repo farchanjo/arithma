@@ -8,6 +8,8 @@
 //! The server layer does no post-processing.
 
 pub mod builder;
+pub mod expression_error;
 pub mod helpers;
 
 pub use builder::{ErrorCode, Response, error, error_with_detail};
+pub use expression_error::expression_error_envelope;
