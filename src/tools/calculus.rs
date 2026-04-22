@@ -144,7 +144,19 @@ pub fn nth_derivative(expression: &str, variable: &str, point: f64, order: i32) 
 pub fn definite_integral(expression: &str, variable: &str, lower: f64, upper: f64) -> String {
     let tool = TOOL_DEFINITE_INTEGRAL;
     match simpson(expression, variable, lower, upper) {
-        Ok(value) => Response::ok(tool).result(format_f64(value)).build(),
+        Ok(value) => {
+            if !value.is_finite() {
+                // Improper integrals (singularity inside the interval or
+                // unbounded integrand) used to leak `inf`/`NaN` to the caller.
+                return error_with_detail(
+                    tool,
+                    ErrorCode::DomainError,
+                    "integrand diverges on the given interval",
+                    &format!("lower={lower}, upper={upper}"),
+                );
+            }
+            Response::ok(tool).result(format_f64(value)).build()
+        }
         Err(err) => map_expression_error(tool, &err),
     }
 }
@@ -325,6 +337,19 @@ mod tests {
         assert_eq!(
             definite_integral("bogus(x)", "x", 0.0, 1.0),
             "DEFINITE_INTEGRAL: ERROR\nREASON: [UNKNOWN_FUNCTION] expression calls an unknown function\nDETAIL: name=bogus"
+        );
+    }
+
+    #[test]
+    fn integral_with_singularity_inside_interval_errors() {
+        // Regression: `1/x` on [-1, 1] crosses x=0. Simpson's rule samples
+        // x=0 exactly (10 000 even-numbered intervals), which triggers the
+        // expression evaluator's division-by-zero guard. Previously returned
+        // `RESULT: inf`.
+        let out = definite_integral("1/x", "x", -1.0, 1.0);
+        assert!(
+            out.starts_with("DEFINITE_INTEGRAL: ERROR\nREASON: ["),
+            "got {out}"
         );
     }
 
