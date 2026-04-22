@@ -165,7 +165,7 @@ fn finite_or_domain(
 
 /// Exponentiation. Integer exponents stay exact via `BigDecimal::powi`;
 /// negative integers invert the base; fractional or very large integers fall
-/// through to BigFloat and round back.
+/// through to `BigFloat` and round back.
 fn power(base: &BigDecimal, exp: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     if let Some(e) = as_nonneg_u32(exp) {
         return Ok(base.powi(i64::from(e)));
