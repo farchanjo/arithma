@@ -432,6 +432,21 @@ impl Reg {
     fn reg_temp(&mut self, code: &'static str, name: &'static str) {
         self.reg(code, name, UnitCategory::Temperature, None);
     }
+
+    /// Register an alias that looks up to the same `UnitDefinition` as an
+    /// existing code. Invisible to `listUnits` (not added to `order`/`index`)
+    /// so the canonical code remains the one callers see, but the alias
+    /// resolves in `convert` / `getConversionFactor`.
+    ///
+    /// The primary use is bridging SI-standard symbols (`V`, `A`, `H`, `F`)
+    /// to the registry's internal codes (`vlt`, `amp`, `hy`, `fd`). Typing
+    /// `v` or `kv` now works; existing code using `vlt`/`kvlt` continues to
+    /// work unchanged.
+    fn reg_alias(&mut self, alias: &'static str, target: &'static str) {
+        if let Some(def) = self.units.get(target).cloned() {
+            self.units.insert(alias, def);
+        }
+    }
 }
 
 fn populate(reg: &mut Reg) {
@@ -486,6 +501,11 @@ fn register_data_storage(reg: &mut Reg) {
     let cat = UnitCategory::DataStorage;
     reg.reg_base("byte", "byte", cat);
     reg.reg_factor("bit", "bit", cat, bd("0.125"));
+    // `B` is the SI symbol for byte (uppercase); lookup is case-insensitive
+    // so both `B` and `b` resolve here. Users write `KB`/`MB`/`GB` with
+    // uppercase-B by convention — a standalone `B` must work the same way
+    // or `convertAutoDetect(1024, "KB", "B")` surprises the caller.
+    reg.reg_alias("b", "byte");
     reg.reg_factor("kb", "kilobyte", cat, bd("1000"));
     reg.reg_factor("mb", "megabyte", cat, bd("1000000"));
     reg.reg_factor("gb", "gigabyte", cat, bd("1000000000"));
@@ -496,6 +516,17 @@ fn register_data_storage(reg: &mut Reg) {
     reg.reg_factor("gib", "gibibyte", cat, bd("1073741824"));
     reg.reg_factor("tib", "tebibyte", cat, bd("1099511627776"));
     reg.reg_factor("pib", "pebibyte", cat, bd("1125899906842624"));
+    // Full SI-prefixed spellings for readability.
+    reg.reg_alias("kilobyte", "kb");
+    reg.reg_alias("megabyte", "mb");
+    reg.reg_alias("gigabyte", "gb");
+    reg.reg_alias("terabyte", "tb");
+    reg.reg_alias("petabyte", "pb");
+    reg.reg_alias("kibibyte", "kib");
+    reg.reg_alias("mebibyte", "mib");
+    reg.reg_alias("gibibyte", "gib");
+    reg.reg_alias("tebibyte", "tib");
+    reg.reg_alias("pebibyte", "pib");
 }
 
 fn register_length(reg: &mut Reg) {
@@ -515,6 +546,21 @@ fn register_length(reg: &mut Reg) {
     reg.reg_factor("nmi", "nautical mile", cat, bd("1852"));
     // Imperial thou = one thousandth of an inch, common in machining.
     reg.reg_factor("mil", "thou", cat, bd("0.0000254"));
+    // Long-name aliases — callers intuitively type the English name.
+    reg.reg_alias("meter", "m");
+    reg.reg_alias("metre", "m");
+    reg.reg_alias("micrometer", "um");
+    reg.reg_alias("nanometer", "nm");
+    reg.reg_alias("angstrom", "ang");
+    reg.reg_alias("millimeter", "mm");
+    reg.reg_alias("centimeter", "cm");
+    reg.reg_alias("kilometer", "km");
+    reg.reg_alias("kilometre", "km");
+    reg.reg_alias("inch", "in");
+    reg.reg_alias("foot", "ft");
+    reg.reg_alias("feet", "ft");
+    reg.reg_alias("yard", "yd");
+    reg.reg_alias("mile", "mi");
 }
 
 fn register_mass(reg: &mut Reg) {
@@ -526,6 +572,17 @@ fn register_mass(reg: &mut Reg) {
     reg.reg_factor("lb", "pound", cat, POUND_KG.clone());
     reg.reg_factor("oz", "ounce", cat, bd("0.028349523125"));
     reg.reg_factor("st", "stone", cat, bd("6.35029318"));
+    // Long-name aliases so `convert 1 tonne → kg` works the same as `t`.
+    // `ton` is deliberately NOT aliased — US short ton = 907 kg differs
+    // from metric tonne (1000 kg) and silently routing it would be a
+    // silent precision bug.
+    reg.reg_alias("tonne", "t");
+    reg.reg_alias("pound", "lb");
+    reg.reg_alias("ounce", "oz");
+    reg.reg_alias("stone", "st");
+    reg.reg_alias("gram", "g");
+    reg.reg_alias("kilogram", "kg");
+    reg.reg_alias("milligram", "mg");
 }
 
 fn register_volume(reg: &mut Reg) {
@@ -539,6 +596,15 @@ fn register_volume(reg: &mut Reg) {
     reg.reg_factor("tbsp", "tablespoon", cat, bd("0.01478676478125"));
     reg.reg_factor("tsp", "teaspoon", cat, bd("0.00492892159375"));
     reg.reg_factor("usfloz", "US fluid ounce", cat, bd("0.0295735295625"));
+    // Default-to-US aliases for common ambiguous names. `gal`, `cup`,
+    // `floz` are used interchangeably with the US variant in everyday
+    // English; callers who need imperial must spell out `igal`.
+    reg.reg_alias("gal", "usgal");
+    reg.reg_alias("gallon", "usgal");
+    reg.reg_alias("cup", "uscup");
+    reg.reg_alias("floz", "usfloz");
+    reg.reg_alias("liter", "l");
+    reg.reg_alias("litre", "l");
 }
 
 fn register_temperature(reg: &mut Reg) {
@@ -546,6 +612,13 @@ fn register_temperature(reg: &mut Reg) {
     reg.reg_temp("f", "Fahrenheit");
     reg.reg_temp("k", "Kelvin");
     reg.reg_temp("r", "Rankine");
+    // Full-name aliases share the same `UnitDefinition`, including the
+    // temperature-specific `None` factor that routes through the
+    // Celsius-pivot formulas rather than a multiplicative factor.
+    reg.reg_alias("celsius", "c");
+    reg.reg_alias("fahrenheit", "f");
+    reg.reg_alias("kelvin", "k");
+    reg.reg_alias("rankine", "r");
 }
 
 fn register_time(reg: &mut Reg) {
@@ -557,6 +630,15 @@ fn register_time(reg: &mut Reg) {
     reg.reg_factor("d", "day", cat, bd("86400"));
     reg.reg_factor("wk", "week", cat, bd("604800"));
     reg.reg_factor("yr", "year", cat, bd("31557600"));
+    // Long-name aliases. `y` deliberately NOT aliased — in some contexts
+    // (astronomy, probability) it's a variable name; the explicit `yr`
+    // or `year` avoids that trap.
+    reg.reg_alias("second", "s");
+    reg.reg_alias("minute", "min");
+    reg.reg_alias("hour", "h");
+    reg.reg_alias("day", "d");
+    reg.reg_alias("week", "wk");
+    reg.reg_alias("year", "yr");
 }
 
 fn register_speed(reg: &mut Reg) {
@@ -566,6 +648,12 @@ fn register_speed(reg: &mut Reg) {
     reg.reg_factor("mph", "mile per hour", cat, bd("0.44704"));
     reg.reg_factor("kn", "knot", cat, KNOT_MS.clone());
     reg.reg_factor("ft/s", "foot per second", cat, FOOT_M.clone());
+    // Symbol aliases without the slash — common in code and prose.
+    reg.reg_alias("mps", "m/s");
+    reg.reg_alias("kmh", "km/h");
+    reg.reg_alias("kph", "km/h");
+    reg.reg_alias("knot", "kn");
+    reg.reg_alias("fps", "ft/s");
 }
 
 fn register_area(reg: &mut Reg) {
@@ -577,6 +665,9 @@ fn register_area(reg: &mut Reg) {
     reg.reg_factor("ac", "acre", cat, bd("4046.8564224"));
     reg.reg_factor("ha", "hectare", cat, bd("10000"));
     reg.reg_factor("mi2", "square mile", cat, bd("2589988.110336"));
+    // Long-name aliases for recognisability.
+    reg.reg_alias("acre", "ac");
+    reg.reg_alias("hectare", "ha");
 }
 
 fn register_energy(reg: &mut Reg) {
@@ -587,6 +678,17 @@ fn register_energy(reg: &mut Reg) {
     reg.reg_factor("kwh", "kilowatt-hour", cat, bd("3600000"));
     reg.reg_factor("btu", "BTU", cat, bd("1055.05585262"));
     reg.reg_factor("ev", "electronvolt", cat, bd("1.602176634E-19"));
+    // SI + long-name aliases.
+    reg.reg_alias("joule", "j");
+    reg.reg_alias("calorie", "cal");
+    reg.reg_alias("kilocalorie", "kcal");
+    reg.reg_alias("electronvolt", "ev");
+    // `kj` is unambiguous (kilojoule) — no conflict with any other
+    // category's base code.
+    reg.reg_factor("kj", "kilojoule", cat, THOUSAND.clone());
+    reg.reg_factor("mj", "megajoule", cat, MILLION.clone());
+    reg.reg_alias("kilojoule", "kj");
+    reg.reg_alias("megajoule", "mj");
 }
 
 fn register_force(reg: &mut Reg) {
@@ -595,6 +697,8 @@ fn register_force(reg: &mut Reg) {
     reg.reg_factor("dyn", "dyne", cat, bd("0.00001"));
     reg.reg_factor("lbf", "pound-force", cat, LBF_N.clone());
     reg.reg_factor("kgf", "kilogram-force", cat, GRAVITY.clone());
+    reg.reg_alias("newton", "n");
+    reg.reg_alias("dyne", "dyn");
 }
 
 fn register_pressure(reg: &mut Reg) {
@@ -605,6 +709,12 @@ fn register_pressure(reg: &mut Reg) {
     reg.reg_factor("psi", "pound per square inch", cat, PSI_PA.clone());
     reg.reg_factor("torr", "torr", cat, TORR_PA.clone());
     reg.reg_factor("mmhg", "millimeter of mercury", cat, bd("133.322387415"));
+    reg.reg_factor("kpa", "kilopascal", cat, THOUSAND.clone());
+    reg.reg_factor("mpa", "megapascal", cat, MILLION.clone());
+    reg.reg_alias("pascal", "pa");
+    reg.reg_alias("atmosphere", "atm");
+    reg.reg_alias("kilopascal", "kpa");
+    reg.reg_alias("megapascal", "mpa");
 }
 
 fn register_power(reg: &mut Reg) {
@@ -613,6 +723,13 @@ fn register_power(reg: &mut Reg) {
     reg.reg_factor("kw", "kilowatt", cat, THOUSAND.clone());
     reg.reg_factor("hp", "horsepower", cat, HP_W.clone());
     reg.reg_factor("btu/h", "BTU per hour", cat, BTU_H_W.clone());
+    reg.reg_factor("mw", "megawatt", cat, MILLION.clone());
+    reg.reg_factor("gw", "gigawatt", cat, BILLION.clone());
+    reg.reg_alias("watt", "w");
+    reg.reg_alias("kilowatt", "kw");
+    reg.reg_alias("megawatt", "mw");
+    reg.reg_alias("gigawatt", "gw");
+    reg.reg_alias("horsepower", "hp");
 }
 
 fn register_density(reg: &mut Reg) {
@@ -630,6 +747,10 @@ fn register_frequency(reg: &mut Reg) {
     reg.reg_factor("mhz", "megahertz", cat, bd("1000000"));
     reg.reg_factor("ghz", "gigahertz", cat, bd("1000000000"));
     reg.reg_factor("rpm", "revolutions per minute", cat, RPM_HZ.clone());
+    reg.reg_alias("hertz", "hz");
+    reg.reg_alias("kilohertz", "khz");
+    reg.reg_alias("megahertz", "mhz");
+    reg.reg_alias("gigahertz", "ghz");
 }
 
 fn register_angle(reg: &mut Reg) {
@@ -640,6 +761,11 @@ fn register_angle(reg: &mut Reg) {
     reg.reg_factor("arcmin", "arcminute", cat, ARCMIN_DEG.clone());
     reg.reg_factor("arcsec", "arcsecond", cat, ARCSEC_DEG.clone());
     reg.reg_factor("turn", "turn", cat, bd("360"));
+    reg.reg_alias("degree", "deg");
+    reg.reg_alias("radian", "rad");
+    reg.reg_alias("gradian", "grad");
+    reg.reg_alias("arcminute", "arcmin");
+    reg.reg_alias("arcsecond", "arcsec");
 }
 
 fn register_data_rate(reg: &mut Reg) {
@@ -661,6 +787,11 @@ fn register_resistance(reg: &mut Reg) {
     reg.reg_factor("mohm", "milliohm", cat, MILLI.clone());
     reg.reg_factor("kohm", "kiloohm", cat, THOUSAND.clone());
     reg.reg_factor("megohm", "megaohm", cat, MILLION.clone());
+    reg.reg_alias("milliohm", "mohm");
+    reg.reg_alias("kiloohm", "kohm");
+    reg.reg_alias("kilohm", "kohm");
+    reg.reg_alias("megaohm", "megohm");
+    reg.reg_alias("megohm", "megohm");
 }
 
 fn register_capacitance(reg: &mut Reg) {
@@ -670,6 +801,17 @@ fn register_capacitance(reg: &mut Reg) {
     reg.reg_factor("uf", "microfarad", cat, MICRO.clone());
     reg.reg_factor("nf", "nanofarad", cat, NANO.clone());
     reg.reg_factor("pf", "picofarad", cat, PICO.clone());
+    // SI-style prefix aliases for multi-letter combinations. The bare `f`
+    // symbol collides with `f`/Fahrenheit in the temperature registry
+    // (lookup is ASCII-case-insensitive), so we only add prefix
+    // combinations that are unambiguous: `mf` → millifarad is the only
+    // meaning in any category.
+    reg.reg_alias("mf", "mfd");
+    reg.reg_alias("farad", "fd");
+    reg.reg_alias("millifarad", "mfd");
+    reg.reg_alias("microfarad", "uf");
+    reg.reg_alias("nanofarad", "nf");
+    reg.reg_alias("picofarad", "pf");
 }
 
 fn register_inductance(reg: &mut Reg) {
@@ -678,6 +820,17 @@ fn register_inductance(reg: &mut Reg) {
     reg.reg_factor("mhy", "millihenry", cat, MILLI.clone());
     reg.reg_factor("uhy", "microhenry", cat, MICRO.clone());
     reg.reg_factor("nhy", "nanohenry", cat, NANO.clone());
+    // SI-style prefix aliases. Bare `h` is already taken by `hour` in the
+    // time registry; users asking for a henry need `hy`. The prefixed
+    // variants (`mH`, `µH`, `nH`) are unambiguous SI notation, so they
+    // alias directly.
+    reg.reg_alias("mh", "mhy");
+    reg.reg_alias("uh", "uhy");
+    reg.reg_alias("nh", "nhy");
+    reg.reg_alias("henry", "hy");
+    reg.reg_alias("millihenry", "mhy");
+    reg.reg_alias("microhenry", "uhy");
+    reg.reg_alias("nanohenry", "nhy");
 }
 
 fn register_voltage(reg: &mut Reg) {
@@ -686,6 +839,17 @@ fn register_voltage(reg: &mut Reg) {
     reg.reg_factor("mvlt", "millivolt", cat, MILLI.clone());
     reg.reg_factor("kvlt", "kilovolt", cat, THOUSAND.clone());
     reg.reg_factor("uvlt", "microvolt", cat, MICRO.clone());
+    // SI symbol aliases — `V`, `mV`, `kV`, `µV` (ASCII `uv`) are universal
+    // and don't collide with any other category's code (`v` is unused in
+    // the registry outside `vlt`).
+    reg.reg_alias("v", "vlt");
+    reg.reg_alias("mv", "mvlt");
+    reg.reg_alias("kv", "kvlt");
+    reg.reg_alias("uv", "uvlt");
+    reg.reg_alias("volt", "vlt");
+    reg.reg_alias("millivolt", "mvlt");
+    reg.reg_alias("kilovolt", "kvlt");
+    reg.reg_alias("microvolt", "uvlt");
 }
 
 fn register_current(reg: &mut Reg) {
@@ -694,6 +858,17 @@ fn register_current(reg: &mut Reg) {
     reg.reg_factor("mamp", "milliampere", cat, MILLI.clone());
     reg.reg_factor("uamp", "microampere", cat, MICRO.clone());
     reg.reg_factor("namp", "nanoampere", cat, NANO.clone());
+    // SI symbol aliases — `A`, `mA`, `µA` (ASCII `uA`), `nA`. Bare `a`
+    // doesn't collide in the current registry (no other base unit uses
+    // just "a"), so all four alias cleanly.
+    reg.reg_alias("a", "amp");
+    reg.reg_alias("ma", "mamp");
+    reg.reg_alias("ua", "uamp");
+    reg.reg_alias("na", "namp");
+    reg.reg_alias("ampere", "amp");
+    reg.reg_alias("milliampere", "mamp");
+    reg.reg_alias("microampere", "uamp");
+    reg.reg_alias("nanoampere", "namp");
 }
 
 // ------------------------------------------------------------------ //
@@ -762,7 +937,18 @@ pub fn convert(value: &BigDecimal, from: &str, to: &str) -> Result<BigDecimal, U
             .as_ref()
             .expect("non-temperature units have a factor");
         let product = mul(value, src_factor);
-        Ok(div_scale(&product, tgt_factor))
+        let raw = div_scale(&product, tgt_factor);
+        // Factors that are truncated irrationals (1/60 for RPM, 1/π for
+        // rad→deg) leak a couple of ULPs at DECIMAL128 precision: `60 rpm
+        // → 1.000000000000000000000000000000002 Hz`. Trimming the final
+        // result to `DECIMAL128_PRECISION - 2` = 32 significant digits
+        // absorbs that drift so clean conversions close exactly, while
+        // still preserving far more precision than any realistic caller
+        // will consume. Matches the "15 of 17 f64 digits" trim applied by
+        // the matrix formatter for the same reason.
+        let safe_prec = std::num::NonZeroU64::new(DECIMAL128_PRECISION - 2)
+            .expect("DECIMAL128_PRECISION - 2 is non-zero");
+        Ok(raw.with_precision_round(safe_prec, RoundingMode::HalfUp))
     }
 }
 
@@ -851,7 +1037,14 @@ pub fn conversion_factor(from: &str, to: &str) -> Result<BigDecimal, UnitError> 
         .to_base_factor
         .as_ref()
         .expect("non-temperature units have a factor");
-    Ok(div_scale(src, tgt))
+    // Same `DECIMAL128_PRECISION - 2` trim as `convert` — the factor is
+    // an intermediate the caller may display verbatim (via
+    // `explainConversion`), so trimming the ULP noise keeps the number
+    // presentation-clean without losing usable precision.
+    let raw = div_scale(src, tgt);
+    let safe_prec = std::num::NonZeroU64::new(DECIMAL128_PRECISION - 2)
+        .expect("DECIMAL128_PRECISION - 2 is non-zero");
+    Ok(raw.with_precision_round(safe_prec, RoundingMode::HalfUp))
 }
 
 /// Human-readable explanation of a conversion, matching Java output byte-for-byte.
@@ -1119,7 +1312,7 @@ mod tests {
     fn km_to_mi_exact() {
         let result = convert(&bd_test("1"), "km", "mi").unwrap();
         // 1000 / 1609.344 with HALF_UP at scale 34
-        eq_plain(&result, "0.6213711922373339696174341843633182");
+        eq_plain(&result, "0.62137119223733396961743418436332");
     }
 
     #[test]
@@ -1281,7 +1474,7 @@ mod tests {
     #[test]
     fn conversion_factor_km_to_mi() {
         let factor = conversion_factor("km", "mi").unwrap();
-        eq_plain(&factor, "0.6213711922373339696174341843633182");
+        eq_plain(&factor, "0.62137119223733396961743418436332");
     }
 
     #[test]
@@ -1289,7 +1482,7 @@ mod tests {
         let text = explain_conversion("km", "mi").unwrap();
         assert_eq!(
             text,
-            "1 kilometer = 0.6213711922373339696174341843633182 mile"
+            "1 kilometer = 0.62137119223733396961743418436332 mile"
         );
     }
 
@@ -1327,9 +1520,12 @@ mod tests {
     fn all_units_has_expected_count() {
         // DATA_STORAGE = 12 (SI decimal + IEC binary + byte/bit).
         // LENGTH = 13 (added um, nm, ang, mil on top of the original 9).
-        // 12 + 13 + 7 + 9 + 4 + 7 + 5 + 7 + 6 + 4 + 6 + 4 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4
+        // ENERGY = 8 (j, cal, kcal, kwh, btu, ev, kj, mj).
+        // PRESSURE = 8 (pa, bar, atm, psi, torr, mmhg, kpa, mpa).
+        // POWER = 6 (w, kw, hp, btu/h, mw, gw).
+        // 12 + 13 + 7 + 9 + 4 + 7 + 5 + 7 + 8 + 4 + 8 + 6 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4
         let expected =
-            12 + 13 + 7 + 9 + 4 + 7 + 5 + 7 + 6 + 4 + 6 + 4 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4;
+            12 + 13 + 7 + 9 + 4 + 7 + 5 + 7 + 8 + 4 + 8 + 6 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4;
         assert_eq!(all_units().len(), expected);
     }
 
@@ -1386,5 +1582,111 @@ mod tests {
     fn conversion_factor_same_unit_is_one() {
         let factor = conversion_factor("m", "m").unwrap();
         eq_plain(&factor, "1");
+    }
+
+    #[test]
+    fn electrical_si_aliases_resolve() {
+        // Regression: callers intuitively type the SI symbol (`V`, `kV`,
+        // `mA`, `mH`), which used to error out because the registry's
+        // canonical codes were `vlt/kvlt/mamp/mhy`. Aliases now bridge
+        // the unambiguous prefixed variants.
+        let v_to_mv = convert(&bd_test("1"), "v", "mv").unwrap();
+        eq_plain(&v_to_mv, "1000");
+        let kv_to_v = convert(&bd_test("1"), "kv", "v").unwrap();
+        eq_plain(&kv_to_v, "1000");
+        let a_to_ma = convert(&bd_test("1"), "a", "ma").unwrap();
+        eq_plain(&a_to_ma, "1000");
+        let mh_to_nh = convert(&bd_test("1"), "mh", "nh").unwrap();
+        eq_plain(&mh_to_nh, "1000000");
+        let mf_to_nf = convert(&bd_test("1"), "mf", "nf").unwrap();
+        eq_plain(&mf_to_nf, "1000000");
+    }
+
+    #[test]
+    fn electrical_si_aliases_interop_with_legacy_codes() {
+        // Old code (`vlt`, `mvlt`, …) keeps working and mixes freely
+        // with the new SI aliases.
+        let v_to_mvlt = convert(&bd_test("1"), "v", "mvlt").unwrap();
+        eq_plain(&v_to_mvlt, "1000");
+        let vlt_to_mv = convert(&bd_test("1"), "vlt", "mv").unwrap();
+        eq_plain(&vlt_to_mv, "1000");
+    }
+
+    #[test]
+    fn electrical_aliases_do_not_collide_with_existing_codes() {
+        // `f` (Fahrenheit) and `h` (hour) pre-date the SI aliases. To
+        // avoid silently re-routing temperature/time conversions through
+        // the electrical registry, the bare single-letter aliases for
+        // farad and henry were deliberately NOT added — callers must use
+        // the canonical `fd`/`hy` or the unambiguous prefixed variants
+        // (`mf`, `mh`, `uh`, `nh`).
+        assert!(
+            convert(&bd_test("32"), "f", "c").is_ok(),
+            "f must still resolve to Fahrenheit"
+        );
+        assert!(
+            convert(&bd_test("1"), "h", "min").is_ok(),
+            "h must still resolve to hour"
+        );
+    }
+
+    #[test]
+    fn list_units_does_not_expose_aliases() {
+        // Aliases must stay invisible — `listUnits(VOLTAGE)` should still
+        // show exactly the canonical set `vlt/mvlt/kvlt/uvlt`, not
+        // duplicate entries like `v`, `mv`.
+        let codes: Vec<String> = list_units(UnitCategory::Voltage)
+            .into_iter()
+            .map(|u| u.code.clone())
+            .collect();
+        assert_eq!(codes.len(), 4, "got {codes:?}");
+        assert!(codes.contains(&"vlt".to_string()), "got {codes:?}");
+        assert!(!codes.contains(&"v".to_string()), "got {codes:?}");
+    }
+
+    #[test]
+    fn long_name_aliases_resolve() {
+        // Regression: callers type the full English name (`tonne`, `acre`,
+        // `gallon`, `hour`) rather than the short registry codes (`t`,
+        // `ac`, `usgal`, `h`). Long-name aliases close that UX gap.
+        eq_plain(&convert(&bd_test("1"), "tonne", "kg").unwrap(), "1000");
+        eq_plain(
+            &convert(&bd_test("1"), "acre", "m2").unwrap(),
+            "4046.8564224",
+        );
+        eq_plain(&convert(&bd_test("1"), "hectare", "m2").unwrap(), "10000");
+        eq_plain(
+            &convert(&bd_test("1"), "gallon", "l").unwrap(),
+            "3.785411784",
+        );
+        eq_plain(&convert(&bd_test("1"), "gal", "l").unwrap(), "3.785411784");
+        eq_plain(&convert(&bd_test("1"), "hour", "min").unwrap(), "60");
+        eq_plain(&convert(&bd_test("1"), "year", "d").unwrap(), "365.25");
+        eq_plain(&convert(&bd_test("1"), "litre", "ml").unwrap(), "1000");
+    }
+
+    #[test]
+    fn ambiguous_names_not_aliased() {
+        // `ton` (US short ton ≈ 907 kg) must NOT silently route to the
+        // metric tonne alias — that would be a 9% precision bug. `y`
+        // (year?) similarly not aliased because single-letter is too
+        // easy to confuse with a variable.
+        assert!(convert(&bd_test("1"), "ton", "kg").is_err());
+        assert!(convert(&bd_test("1"), "y", "s").is_err());
+    }
+
+    #[test]
+    fn reciprocal_factor_conversions_round_cleanly() {
+        // Regression: `RPM_HZ = 1/60` is stored as a 34-digit truncation of
+        // the true rational. Multiplying by `60` leaked a `+2e-33` residue
+        // into the `60 rpm → 1 hz` conversion. Trimming the final result
+        // to `FACTOR_SCALE - 2` absorbs the drift so clean multiples
+        // close exactly.
+        eq_plain(&convert(&bd_test("60"), "rpm", "hz").unwrap(), "1");
+        eq_plain(&convert(&bd_test("3600"), "rpm", "hz").unwrap(), "60");
+        eq_plain(
+            &convert(&bd_test("1"), "rpm", "hz").unwrap(),
+            "0.016666666666666666666666666666667",
+        );
     }
 }
