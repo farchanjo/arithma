@@ -6,10 +6,16 @@
 //! IUPAC table. Polyatomic groups via parentheses are supported one level deep
 //! and through arbitrary nesting via the recursive parser.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::LazyLock;
 
+use bigdecimal::BigDecimal;
+use num_traits::Zero;
+
+use crate::engine::bigdecimal_ext::strip_plain;
 use crate::mcp::message::{ErrorCode, Response, error_with_detail};
+use crate::tools::numeric::canonicalize_zero;
 
 const TOOL_MOLAR_MASS: &str = "MOLAR_MASS";
 const TOOL_PH: &str = "PH";
@@ -24,135 +30,149 @@ const TOOL_IDEAL_GAS_MOLES: &str = "IDEAL_GAS_MOLES";
 const R_GAS: f64 = 8.314_462;
 const LN2: f64 = std::f64::consts::LN_2;
 
-static ATOMIC_WEIGHTS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(|| {
-    // IUPAC 2021 standard atomic weights, abridged for the most common 60+
-    // elements used in introductory and applied chemistry. Values in g/mol.
-    let mut m = HashMap::new();
-    let pairs: &[(&str, f64)] = &[
-        ("H", 1.008),
-        ("He", 4.002_602),
-        ("Li", 6.94),
-        ("Be", 9.012_183),
-        ("B", 10.81),
-        ("C", 12.011),
-        ("N", 14.007),
-        ("O", 15.999),
-        ("F", 18.998_403_163),
-        ("Ne", 20.1797),
-        ("Na", 22.989_769_28),
-        ("Mg", 24.305),
-        ("Al", 26.981_538_4),
-        ("Si", 28.085),
-        ("P", 30.973_761_998),
-        ("S", 32.06),
-        ("Cl", 35.45),
-        ("Ar", 39.95),
-        ("K", 39.0983),
-        ("Ca", 40.078),
-        ("Sc", 44.955_908),
-        ("Ti", 47.867),
-        ("V", 50.9415),
-        ("Cr", 51.9961),
-        ("Mn", 54.938_044),
-        ("Fe", 55.845),
-        ("Co", 58.933_194),
-        ("Ni", 58.6934),
-        ("Cu", 63.546),
-        ("Zn", 65.38),
-        ("Ga", 69.723),
-        ("Ge", 72.630),
-        ("As", 74.921_595),
-        ("Se", 78.971),
-        ("Br", 79.904),
-        ("Kr", 83.798),
-        ("Rb", 85.4678),
-        ("Sr", 87.62),
-        ("Y", 88.905_84),
-        ("Zr", 91.224),
-        ("Nb", 92.906_37),
-        ("Mo", 95.95),
-        ("Ag", 107.8682),
-        ("Cd", 112.414),
-        ("In", 114.818),
-        ("Sn", 118.710),
-        ("Sb", 121.760),
-        ("Te", 127.60),
-        ("I", 126.904_47),
-        ("Xe", 131.293),
-        ("Cs", 132.905_451_96),
-        ("Ba", 137.327),
-        ("Pt", 195.084),
-        ("Au", 196.966_569),
-        ("Hg", 200.592),
-        ("Tl", 204.38),
-        ("Pb", 207.2),
-        ("Bi", 208.980_40),
-        ("Po", 209.0),
-        ("At", 210.0),
-        ("Rn", 222.0),
-        ("Fr", 223.0),
-        ("Ra", 226.0),
-        ("Ac", 227.0),
-        ("Th", 232.037_7),
-        ("Pa", 231.035_88),
-        ("U", 238.028_91),
-        ("Np", 237.0),
-        ("Pu", 244.0),
-        ("Am", 243.0),
-        ("Cm", 247.0),
-        ("Bk", 247.0),
-        ("Cf", 251.0),
-        ("Es", 252.0),
-        ("Fm", 257.0),
-        ("Md", 258.0),
-        ("No", 259.0),
-        ("Lr", 266.0),
-        ("Rf", 267.0),
-        ("Db", 268.0),
-        ("Sg", 269.0),
-        ("Bh", 270.0),
-        ("Hs", 269.0),
-        ("Mt", 278.0),
-        ("Ds", 281.0),
-        ("Rg", 282.0),
-        ("Cn", 285.0),
+/// IUPAC 2021 standard atomic weights, abridged for the most common 60+
+/// elements used in introductory and applied chemistry. Values are stored as
+/// decimal string literals so the `BigDecimal` parse preserves every published
+/// digit — f64 drift (e.g. `12.011 + 15.999 = 28.009999999999998`) is
+/// unacceptable for a unit-conversion table per the project precision policy.
+static ATOMIC_WEIGHTS: LazyLock<HashMap<&'static str, BigDecimal>> = LazyLock::new(|| {
+    let pairs: &[(&str, &str)] = &[
+        ("H", "1.008"),
+        ("He", "4.002602"),
+        ("Li", "6.94"),
+        ("Be", "9.012183"),
+        ("B", "10.81"),
+        ("C", "12.011"),
+        ("N", "14.007"),
+        ("O", "15.999"),
+        ("F", "18.998403163"),
+        ("Ne", "20.1797"),
+        ("Na", "22.98976928"),
+        ("Mg", "24.305"),
+        ("Al", "26.9815384"),
+        ("Si", "28.085"),
+        ("P", "30.973761998"),
+        ("S", "32.06"),
+        ("Cl", "35.45"),
+        ("Ar", "39.95"),
+        ("K", "39.0983"),
+        ("Ca", "40.078"),
+        ("Sc", "44.955908"),
+        ("Ti", "47.867"),
+        ("V", "50.9415"),
+        ("Cr", "51.9961"),
+        ("Mn", "54.938044"),
+        ("Fe", "55.845"),
+        ("Co", "58.933194"),
+        ("Ni", "58.6934"),
+        ("Cu", "63.546"),
+        ("Zn", "65.38"),
+        ("Ga", "69.723"),
+        ("Ge", "72.630"),
+        ("As", "74.921595"),
+        ("Se", "78.971"),
+        ("Br", "79.904"),
+        ("Kr", "83.798"),
+        ("Rb", "85.4678"),
+        ("Sr", "87.62"),
+        ("Y", "88.90584"),
+        ("Zr", "91.224"),
+        ("Nb", "92.90637"),
+        ("Mo", "95.95"),
+        ("Ag", "107.8682"),
+        ("Cd", "112.414"),
+        ("In", "114.818"),
+        ("Sn", "118.710"),
+        ("Sb", "121.760"),
+        ("Te", "127.60"),
+        ("I", "126.90447"),
+        ("Xe", "131.293"),
+        ("Cs", "132.90545196"),
+        ("Ba", "137.327"),
+        ("Pt", "195.084"),
+        ("Au", "196.966569"),
+        ("Hg", "200.592"),
+        ("Tl", "204.38"),
+        ("Pb", "207.2"),
+        ("Bi", "208.98040"),
+        ("Po", "209"),
+        ("At", "210"),
+        ("Rn", "222"),
+        ("Fr", "223"),
+        ("Ra", "226"),
+        ("Ac", "227"),
+        ("Th", "232.0377"),
+        ("Pa", "231.03588"),
+        ("U", "238.02891"),
+        ("Np", "237"),
+        ("Pu", "244"),
+        ("Am", "243"),
+        ("Cm", "247"),
+        ("Bk", "247"),
+        ("Cf", "251"),
+        ("Es", "252"),
+        ("Fm", "257"),
+        ("Md", "258"),
+        ("No", "259"),
+        ("Lr", "266"),
+        ("Rf", "267"),
+        ("Db", "268"),
+        ("Sg", "269"),
+        ("Bh", "270"),
+        ("Hs", "269"),
+        ("Mt", "278"),
+        ("Ds", "281"),
+        ("Rg", "282"),
+        ("Cn", "285"),
         // IUPAC 2016 names for elements 113–118 (formerly Uut, Uup, Uus, Uuo).
-        ("Nh", 286.0),
-        ("Fl", 289.0),
-        ("Mc", 289.0),
-        ("Lv", 293.0),
-        ("Ts", 294.0),
-        ("Og", 294.0),
+        ("Nh", "286"),
+        ("Fl", "289"),
+        ("Mc", "289"),
+        ("Lv", "293"),
+        ("Ts", "294"),
+        ("Og", "294"),
+        // IUPAC provisional systematic names (pre-2016) kept as aliases so
+        // older literature parses cleanly. Uuq ≡ Fl (114), Uup ≡ Mc (115),
+        // Uuh ≡ Lv (116), Uus ≡ Ts (117), Uuo ≡ Og (118), Uut ≡ Nh (113).
+        ("Uut", "286"),
+        ("Uuq", "289"),
+        ("Uup", "289"),
+        ("Uuh", "293"),
+        ("Uus", "294"),
+        ("Uuo", "294"),
         // Lanthanides (previously absent — common in materials chemistry).
-        ("La", 138.905_47),
-        ("Ce", 140.116),
-        ("Pr", 140.907_66),
-        ("Nd", 144.242),
-        ("Pm", 145.0),
-        ("Sm", 150.36),
-        ("Eu", 151.964),
-        ("Gd", 157.25),
-        ("Tb", 158.925_35),
-        ("Dy", 162.500),
-        ("Ho", 164.930_33),
-        ("Er", 167.259),
-        ("Tm", 168.934_22),
-        ("Yb", 173.045),
-        ("Lu", 174.9668),
+        ("La", "138.90547"),
+        ("Ce", "140.116"),
+        ("Pr", "140.90766"),
+        ("Nd", "144.242"),
+        ("Pm", "145"),
+        ("Sm", "150.36"),
+        ("Eu", "151.964"),
+        ("Gd", "157.25"),
+        ("Tb", "158.92535"),
+        ("Dy", "162.500"),
+        ("Ho", "164.93033"),
+        ("Er", "167.259"),
+        ("Tm", "168.93422"),
+        ("Yb", "173.045"),
+        ("Lu", "174.9668"),
         // Post-Cs transition metals (Hf, Ta, W, Re, Os, Ir) — also missing.
-        ("Hf", 178.486),
-        ("Ta", 180.947_88),
-        ("W", 183.84),
-        ("Re", 186.207),
-        ("Os", 190.23),
-        ("Ir", 192.217),
-        ("Pd", 106.42),
-        ("Rh", 102.905_50),
-        ("Ru", 101.07),
-        ("Tc", 98.0),
+        ("Hf", "178.486"),
+        ("Ta", "180.94788"),
+        ("W", "183.84"),
+        ("Re", "186.207"),
+        ("Os", "190.23"),
+        ("Ir", "192.217"),
+        ("Pd", "106.42"),
+        ("Rh", "102.90550"),
+        ("Ru", "101.07"),
+        ("Tc", "98"),
     ];
-    for (k, v) in pairs {
-        m.insert(*k, *v);
+    let mut m = HashMap::with_capacity(pairs.len());
+    for (symbol, weight) in pairs {
+        let parsed = BigDecimal::from_str(weight)
+            .unwrap_or_else(|_| panic!("atomic weight literal for {symbol} must parse: {weight}"));
+        m.insert(*symbol, parsed);
     }
     m
 });
@@ -208,6 +228,12 @@ fn parse_group(
     inside_bracket: bool,
 ) -> Result<HashMap<String, u32>, String> {
     let mut counts: HashMap<String, u32> = HashMap::new();
+    // Elements written directly at this flat level (not inside brackets/hydrate
+    // expansions). Repeats here are almost always typos like `H2O2O` — reject
+    // them so the user isn't silently handed an `H2O3` instead of a parse
+    // error. `(OH)2` and hydrates such as `CuSO4·5H2O` merge via sub-groups
+    // and therefore don't populate this set.
+    let mut seen_flat: HashSet<String> = HashSet::new();
     while *pos < chars.len() {
         let ch = chars[*pos];
         if let Some(close) = closing_bracket_for(ch) {
@@ -238,8 +264,14 @@ fn parse_group(
             }
             return Ok(counts);
         } else if ch.is_ascii_uppercase() {
+            let start = *pos;
             let element = parse_element(chars, pos);
             let mult = parse_count(chars, pos);
+            if !seen_flat.insert(element.clone()) {
+                return Err(format!(
+                    "duplicate element '{element}' at position {start}; group elements together (e.g. '{element}3' instead of '{element}2{element}')"
+                ));
+            }
             *counts.entry(element).or_insert(0) += mult;
         } else if ch.is_whitespace() {
             *pos += 1;
@@ -296,6 +328,14 @@ fn title_case_formula(formula: &str) -> String {
     out
 }
 
+/// True when every element name is a real IUPAC symbol (present in the
+/// atomic-weight table). Used to gate retry and ambiguity checks.
+fn all_elements_known(counts: &HashMap<String, u32>) -> bool {
+    counts
+        .keys()
+        .all(|e| ATOMIC_WEIGHTS.contains_key(e.as_str()))
+}
+
 #[must_use]
 pub fn molar_mass(formula: &str) -> String {
     let trimmed = formula.trim();
@@ -303,13 +343,28 @@ pub fn molar_mass(formula: &str) -> String {
         Ok(c) => c,
         Err(first_err) => {
             // Retry with canonical element casing so callers can type `h2o`
-            // or `fe2(so4)3` and still get a match; only elements whose
-            // symbols need letter-2 uppercase (e.g. `CO` vs `Co`) stay
-            // ambiguous and surface the original error.
+            // and still get a match. Reject when the two canonical castings
+            // (title-case and all-upper) both resolve to valid but different
+            // element sets — e.g. `co` is ambiguous between `Co` (cobalt) and
+            // `CO` (carbon monoxide), so silently picking one would be wrong.
             let retried = title_case_formula(trimmed);
             if retried != trimmed
                 && let Ok(c) = parse_formula(&retried)
+                && all_elements_known(&c)
             {
+                let uppered = trimmed.to_ascii_uppercase();
+                if uppered != retried
+                    && let Ok(c2) = parse_formula(&uppered)
+                    && all_elements_known(&c2)
+                    && c != c2
+                {
+                    return error_with_detail(
+                        TOOL_MOLAR_MASS,
+                        ErrorCode::InvalidInput,
+                        "formula casing is ambiguous; element symbols are case-sensitive",
+                        &format!("formula={formula}, possible={retried} or {uppered}"),
+                    );
+                }
                 return render_molar_mass(&retried, &c);
             }
             return error_with_detail(
@@ -332,35 +387,61 @@ fn render_molar_mass(formula: &str, counts: &HashMap<String, u32>) -> String {
             &format!("formula={formula}"),
         );
     }
-    let mut total = 0.0;
-    let mut breakdown: Vec<(String, u32, f64)> = Vec::new();
+    let mut total = BigDecimal::zero();
+    let mut breakdown: Vec<(String, u32, BigDecimal)> = Vec::with_capacity(counts.len());
     for (element, n) in counts {
-        let weight = match ATOMIC_WEIGHTS.get(element.as_str()) {
-            Some(w) => *w,
-            None => {
-                return error_with_detail(
-                    TOOL_MOLAR_MASS,
-                    ErrorCode::UnknownVariable,
-                    "unknown element symbol",
-                    &format!("element={element}"),
-                );
-            }
+        let Some(weight) = ATOMIC_WEIGHTS.get(element.as_str()) else {
+            return error_with_detail(
+                TOOL_MOLAR_MASS,
+                ErrorCode::UnknownVariable,
+                "unknown element symbol",
+                &format!("element={element}"),
+            );
         };
-        let contribution = weight * f64::from(*n);
-        total += contribution;
+        let contribution = weight * BigDecimal::from(*n);
+        total += &contribution;
         breakdown.push((element.clone(), *n, contribution));
     }
     breakdown.sort_by(|a, b| a.0.cmp(&b.0));
     let parts = breakdown
         .iter()
-        .map(|(el, n, c)| format!("{el}{n}={}", fmt(*c)))
+        .map(|(el, n, c)| format!("{el}{n}={}", strip_plain(c)))
         .collect::<Vec<_>>()
         .join(",");
     Response::ok(TOOL_MOLAR_MASS)
         .field("FORMULA", formula)
-        .field("MOLAR_MASS_G_MOL", fmt(total))
+        .field("MOLAR_MASS_G_MOL", strip_plain(&total))
         .field("BREAKDOWN", parts)
         .build()
+}
+
+/// Reject concentrations that the f64 parser can represent but in the wrong
+/// way: negative values are a domain violation, a literal `0` / `-0` is too,
+/// and a tiny positive literal like `1e-500` silently underflows to `+0.0`
+/// during parsing — the caller would otherwise see a confusing
+/// `hConcentration=0` detail despite typing a non-zero value. Splitting
+/// those cases lets the error name the actual problem.
+fn guard_concentration(tool: &str, label: &str, raw: &str, parsed: f64) -> Result<f64, String> {
+    if parsed > 0.0 && parsed.is_finite() {
+        return Ok(parsed);
+    }
+    let trimmed = raw.trim();
+    let looks_positive_but_underflowed =
+        parsed == 0.0 && !trimmed.is_empty() && !trimmed.starts_with('-') && trimmed != "0";
+    if looks_positive_but_underflowed {
+        return Err(error_with_detail(
+            tool,
+            ErrorCode::OutOfRange,
+            &format!("{label} underflowed to 0 during f64 parsing"),
+            &format!("{label}={trimmed}"),
+        ));
+    }
+    Err(error_with_detail(
+        tool,
+        ErrorCode::DomainError,
+        &format!("{label} must be positive (mol/L)"),
+        &format!("{label}={parsed}"),
+    ))
 }
 
 #[must_use]
@@ -369,15 +450,15 @@ pub fn ph(h_concentration: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if h <= 0.0 {
-        return error_with_detail(
-            TOOL_PH,
-            ErrorCode::DomainError,
-            "hConcentration must be positive (mol/L)",
-            &format!("hConcentration={h}"),
-        );
-    }
-    Response::ok(TOOL_PH).result(fmt(-h.log10())).build()
+    let h = match guard_concentration(TOOL_PH, "hConcentration", h_concentration, h) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // `-log10(1) = -0.0` in IEEE-754; the canonicalizer flips that lone
+    // sign-negative zero to `+0.0` so `ph(1)` prints as `0.0`, not `-0.0`.
+    Response::ok(TOOL_PH)
+        .result(fmt(canonicalize_zero(-h.log10())))
+        .build()
 }
 
 #[must_use]
@@ -386,15 +467,15 @@ pub fn poh(oh_concentration: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if oh <= 0.0 {
-        return error_with_detail(
-            TOOL_POH,
-            ErrorCode::DomainError,
-            "ohConcentration must be positive (mol/L)",
-            &format!("ohConcentration={oh}"),
-        );
-    }
-    Response::ok(TOOL_POH).result(fmt(-oh.log10())).build()
+    let oh = match guard_concentration(TOOL_POH, "ohConcentration", oh_concentration, oh) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // Same signed-zero guard as `ph`: `-log10(1) = -0.0` must not leak
+    // into the formatted output.
+    Response::ok(TOOL_POH)
+        .result(fmt(canonicalize_zero(-oh.log10())))
+        .build()
 }
 
 /// Molarity (mol/L) from moles of solute and litres of solution.
@@ -594,9 +675,27 @@ mod tests {
 
     #[test]
     fn molar_mass_water() {
-        // H2O ≈ 2*1.008 + 15.999 = 18.015
+        // H2O = 2*1.008 + 15.999 = 18.015 (exact at BigDecimal precision).
         let out = molar_mass("H2O");
-        approx_field(&out, "MOLAR_MASS_G_MOL", 18.015, 1e-2);
+        assert!(out.contains("MOLAR_MASS_G_MOL: 18.015"), "got {out}");
+        assert!(!out.contains("18.01499"), "got {out}");
+    }
+
+    #[test]
+    fn molar_mass_carbon_monoxide_no_f64_drift() {
+        // C + O = 12.011 + 15.999 = 28.01 exact (BigDecimal strips the
+        // trailing zero). The f64 path used to drift to 28.009999999999998.
+        let out = molar_mass("CO");
+        assert!(out.contains("MOLAR_MASS_G_MOL: 28.01 |"), "got {out}");
+        assert!(!out.contains("28.009999999999998"), "got {out}");
+    }
+
+    #[test]
+    fn molar_mass_nacl_no_f64_drift() {
+        // Na + Cl = 22.98976928 + 35.45 = 58.43976928 (exact).
+        let out = molar_mass("NaCl");
+        assert!(out.contains("MOLAR_MASS_G_MOL: 58.43976928"), "got {out}");
+        assert!(!out.contains("58.43976928000001"), "got {out}");
     }
 
     #[test]
@@ -630,6 +729,34 @@ mod tests {
     fn molar_mass_invalid_syntax_errors() {
         let out = molar_mass("(H2");
         assert!(out.starts_with("MOLAR_MASS: ERROR"));
+    }
+
+    #[test]
+    fn molar_mass_rejects_duplicate_element_at_flat_level() {
+        // `H2O2O` looks like a typo for `H2O3` or `H2O2`. Silently merging it
+        // into `H2O3` used to hide the mistake from the user.
+        let out = molar_mass("H2O2O");
+        assert!(out.starts_with("MOLAR_MASS: ERROR"), "got: {out}");
+        assert!(out.contains("duplicate element 'O'"), "got: {out}");
+    }
+
+    #[test]
+    fn molar_mass_hydrate_remerges_water_without_triggering_duplicate_guard() {
+        // `CuSO4·5H2O` legitimately contributes O inside the hydrate block
+        // even though the outer molecule already has O. Hydrate merges go
+        // through a sub-group, so the flat-duplicate guard must ignore them.
+        let out = molar_mass("CuSO4·5H2O");
+        assert!(out.starts_with("MOLAR_MASS: OK"), "got: {out}");
+        approx_field(&out, "MOLAR_MASS_G_MOL", 249.685, 1e-1);
+    }
+
+    #[test]
+    fn molar_mass_parenthesised_group_does_not_trigger_duplicate_guard() {
+        // `H(OH)` → 1 H flat + (O + H) in a subgroup. The `H` from the
+        // bracket merges into the outer counts map but not into the
+        // flat-level `seen_flat` set.
+        let out = molar_mass("H(OH)");
+        assert!(out.starts_with("MOLAR_MASS: OK"), "got: {out}");
     }
 
     #[test]
@@ -704,7 +831,9 @@ mod tests {
     fn molar_mass_iupac_superheavy_elements() {
         // Elements 113–118 (Nh/Fl/Mc/Lv/Ts/Og) were absent from the table —
         // callers doing nuclear-chemistry lookups hit UNKNOWN_VARIABLE.
-        for symbol in ["Nh", "Fl", "Mc", "Lv", "Ts", "Og"] {
+        for symbol in [
+            "Nh", "Fl", "Mc", "Lv", "Ts", "Og", "Uut", "Uuq", "Uup", "Uuh", "Uus", "Uuo",
+        ] {
             let out = molar_mass(symbol);
             assert!(out.starts_with("MOLAR_MASS: OK"), "{symbol}: {out}");
         }
@@ -739,6 +868,28 @@ mod tests {
     fn ph_invalid_concentration_errors() {
         let out = ph("0");
         assert!(out.starts_with("PH: ERROR"));
+    }
+
+    #[test]
+    fn ph_at_unit_concentration_emits_canonical_zero() {
+        // Regression: `-log10(1) = -0.0` in IEEE-754, so `ph("1")` used to
+        // render as `-0.0`. The signed-zero canonicalizer now gives `0.0`.
+        let out = ph("1");
+        assert!(
+            out.contains("RESULT: 0.0\n") || out.ends_with("RESULT: 0.0"),
+            "got {out}"
+        );
+        assert!(!out.contains("-0.0"), "got {out}");
+    }
+
+    #[test]
+    fn poh_at_unit_concentration_emits_canonical_zero() {
+        let out = poh("1");
+        assert!(
+            out.contains("RESULT: 0.0\n") || out.ends_with("RESULT: 0.0"),
+            "got {out}"
+        );
+        assert!(!out.contains("-0.0"), "got {out}");
     }
 
     #[test]
