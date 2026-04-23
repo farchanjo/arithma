@@ -864,9 +864,10 @@ fn parse_cidr_entry(entry: &str) -> Result<(u32, u32), String> {
     Ok((network, prefix))
 }
 
-fn summary_range(cidr_list: &[String]) -> Result<(u32, u32), String> {
+fn summary_range(cidr_list: &[String]) -> Result<(u32, u32, u64), String> {
     let mut min_network: u32 = u32::MAX;
     let mut max_broadcast: u32 = 0;
+    let mut total_input_addresses: u64 = 0;
     for cidr in cidr_list {
         let (network, prefix) = parse_cidr_entry(cidr)?;
         let mask = cidr_to_mask_v4_u32(prefix);
@@ -877,9 +878,16 @@ fn summary_range(cidr_list: &[String]) -> Result<(u32, u32), String> {
         if broadcast > max_broadcast {
             max_broadcast = broadcast;
         }
+        total_input_addresses += 1_u64 << (IPV4_BITS - prefix);
     }
-    Ok((min_network, max_broadcast))
+    Ok((min_network, max_broadcast, total_input_addresses))
 }
+
+/// Maximum ratio between supernet size and the sum of input address counts.
+/// A 4× ceiling means the supernet may waste at most three times the input
+/// space (typical of near-adjacent aggregation) before the tool refuses and
+/// asks the caller to split the list.
+const MAX_SUMMARIZE_WASTE_RATIO: u64 = 4;
 
 fn compute_summary(subnets_json: &str) -> String {
     let cidr_list = match parse_string_array(SUMMARIZE_SUBNETS, subnets_json) {
@@ -893,7 +901,7 @@ fn compute_summary(subnets_json: &str) -> String {
             "subnet list must not be empty",
         );
     }
-    let (min_network, max_broadcast) = match summary_range(&cidr_list) {
+    let (min_network, max_broadcast, input_addresses) = match summary_range(&cidr_list) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -905,6 +913,23 @@ fn compute_summary(subnets_json: &str) -> String {
     } else {
         diff.leading_zeros()
     };
+    let supernet_addresses = 1_u64 << (IPV4_BITS - super_cidr);
+    // Guard against nonsense aggregations. Two disjoint /24s in unrelated
+    // private ranges (10/8 vs 172.16/12) mathematically admit `0.0.0.0/0` as
+    // their common supernet — but "the whole internet" is never what the
+    // caller asked for. Require the resulting supernet to be within the
+    // waste-ratio cap so adjacency is necessary, not just set coverage.
+    if supernet_addresses > MAX_SUMMARIZE_WASTE_RATIO.saturating_mul(input_addresses) {
+        return error_with_detail(
+            SUMMARIZE_SUBNETS,
+            ErrorCode::InvalidInput,
+            "subnets are not contiguous enough — supernet would include far more addresses than requested",
+            &format!(
+                "supernet=/{super_cidr} ({supernet_addresses} addrs), input_sum={input_addresses} addrs, waste_ratio={}x",
+                supernet_addresses / input_addresses.max(1)
+            ),
+        );
+    }
     let super_mask = cidr_to_mask_v4_u32(super_cidr);
     let super_network = min_network & super_mask;
     let summary = format!(
@@ -1477,14 +1502,33 @@ mod tests {
     }
 
     #[test]
-    fn summarize_wide_non_contiguous_range() {
-        // Regression: the old implementation used `i32` for the `range`
-        // calculation, which overflowed for wide non-contiguous inputs and
-        // silently returned `10.0.0.0/32`. The correct supernet covering all
-        // three RFC-1918 blocks is the entire IPv4 space (`0.0.0.0/0`).
+    fn summarize_refuses_disjoint_rfc1918_blocks() {
+        // Regression: the three RFC-1918 blocks mathematically admit
+        // `0.0.0.0/0` as the common supernet, but that "summary" would
+        // include ~4 billion addresses that the caller never listed. The
+        // tool now refuses when the supernet is far larger than the input
+        // union (4× waste cap).
+        let out = summarize_subnets("[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\"]");
+        assert!(out.starts_with("SUMMARIZE_SUBNETS: ERROR"), "got: {out}");
+        assert!(out.contains("INVALID_INPUT"));
+        assert!(out.contains("not contiguous"));
+    }
+
+    #[test]
+    fn summarize_refuses_two_distant_slash_24s() {
+        // 10/8 and 172.16/12 have nothing in common — their LCP supernet is
+        // 0.0.0.0/0, and returning that silently was the original N6 bug.
+        let out = summarize_subnets("[\"10.0.0.0/24\",\"172.16.0.0/24\"]");
+        assert!(out.starts_with("SUMMARIZE_SUBNETS: ERROR"), "got: {out}");
+    }
+
+    #[test]
+    fn summarize_adjacent_slash_24s_still_succeeds() {
+        // 192.168.0.0/24 + 192.168.1.0/24 is the textbook contiguous case —
+        // the supernet /23 has the same address count as the inputs combined.
         assert_eq!(
-            summarize_subnets("[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\"]",),
-            "SUMMARIZE_SUBNETS: OK | RESULT: 0.0.0.0/0"
+            summarize_subnets("[\"192.168.0.0/24\",\"192.168.1.0/24\"]"),
+            "SUMMARIZE_SUBNETS: OK | RESULT: 192.168.0.0/23"
         );
     }
 
