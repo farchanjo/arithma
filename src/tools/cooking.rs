@@ -183,8 +183,20 @@ fn oven_to_celsius(input: &BigDecimal, source: &str) -> Result<BigDecimal, Strin
                 &format!("value={input}"),
             )
         })?;
-        unit_registry::gas_mark_to_celsius(mark)
-            .map_err(|e| error(TOOL_OVEN, ErrorCode::InvalidInput, &e.to_string()))
+        unit_registry::gas_mark_to_celsius(mark).map_err(|e| match e {
+            // Rewrite the canonical "Gas mark must be 1-10. Received: N"
+            // string into the canonical envelope — lowercase REASON +
+            // structured `DETAIL: mark=N`. Every other tool follows this
+            // shape; leaving the raw Display text makes error parsers
+            // special-case a single tool for no reason.
+            UnitError::InvalidGasMark(n) => error_with_detail(
+                TOOL_OVEN,
+                ErrorCode::InvalidInput,
+                "gas mark must be an integer in [1, 10]",
+                &format!("mark={n}"),
+            ),
+            other => error(TOOL_OVEN, ErrorCode::InvalidInput, &other.to_string()),
+        })
     } else {
         validate_oven_unit(source)?;
         unit_registry::to_celsius(source, input)
@@ -364,5 +376,20 @@ mod tests {
         let out = convert_oven_temperature("11.5", "gasmark", "c");
         assert!(out.starts_with("CONVERT_OVEN_TEMPERATURE: ERROR"));
         assert!(out.contains("value=11.5"), "got: {out}");
+    }
+
+    #[test]
+    fn oven_gas_mark_out_of_range_uses_canonical_envelope() {
+        // Regression: the previous error used the raw `UnitError` Display
+        // string — `Gas mark must be 1-10. Received: 11` — which broke the
+        // lowercase-REASON + `DETAIL: key=value` convention used by every
+        // other tool. The rewritten shape is what error parsers expect.
+        let out = convert_oven_temperature("11", "gasmark", "c");
+        assert_eq!(
+            out,
+            "CONVERT_OVEN_TEMPERATURE: ERROR\nREASON: [INVALID_INPUT] gas mark must be an integer in [1, 10]\nDETAIL: mark=11"
+        );
+        let out_zero = convert_oven_temperature("0", "gasmark", "c");
+        assert!(out_zero.contains("mark=0"), "got {out_zero}");
     }
 }
