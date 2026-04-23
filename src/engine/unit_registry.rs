@@ -479,14 +479,23 @@ fn build_category_index() -> HashMap<UnitCategory, Vec<&'static str>> {
 // --- per-category registrations (each < 30 lines, mirrors Java) ---
 
 fn register_data_storage(reg: &mut Reg) {
+    // `kb`/`mb`/... follow SI (IEC 80000-13 decimal, 1000-based); `kib`/`mib`/...
+    // are the IEC binary (1024-based) counterparts. Users previously got
+    // binary behaviour from `kb`; the rename keeps arithma aligned with every
+    // RFC, vendor, and regulator that has adopted the decimal/binary split.
     let cat = UnitCategory::DataStorage;
     reg.reg_base("byte", "byte", cat);
     reg.reg_factor("bit", "bit", cat, bd("0.125"));
-    reg.reg_factor("kb", "kilobyte", cat, bd("1024"));
-    reg.reg_factor("mb", "megabyte", cat, bd("1048576"));
-    reg.reg_factor("gb", "gigabyte", cat, bd("1073741824"));
-    reg.reg_factor("tb", "terabyte", cat, bd("1099511627776"));
-    reg.reg_factor("pb", "petabyte", cat, bd("1125899906842624"));
+    reg.reg_factor("kb", "kilobyte", cat, bd("1000"));
+    reg.reg_factor("mb", "megabyte", cat, bd("1000000"));
+    reg.reg_factor("gb", "gigabyte", cat, bd("1000000000"));
+    reg.reg_factor("tb", "terabyte", cat, bd("1000000000000"));
+    reg.reg_factor("pb", "petabyte", cat, bd("1000000000000000"));
+    reg.reg_factor("kib", "kibibyte", cat, bd("1024"));
+    reg.reg_factor("mib", "mebibyte", cat, bd("1048576"));
+    reg.reg_factor("gib", "gibibyte", cat, bd("1073741824"));
+    reg.reg_factor("tib", "tebibyte", cat, bd("1099511627776"));
+    reg.reg_factor("pib", "pebibyte", cat, bd("1125899906842624"));
 }
 
 fn register_length(reg: &mut Reg) {
@@ -1291,20 +1300,34 @@ mod tests {
 
     #[test]
     fn all_units_has_expected_count() {
-        // 7 + 9 + 7 + 9 + 4 + 7 + 5 + 7 + 6 + 4 + 6 + 4 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4
+        // DATA_STORAGE now includes both SI decimal (kb/mb/gb/tb/pb) and IEC
+        // binary (kib/mib/gib/tib/pib) families alongside byte/bit — 12 total.
+        // 12 + 9 + 7 + 9 + 4 + 7 + 5 + 7 + 6 + 4 + 6 + 4 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4
         let expected =
-            7 + 9 + 7 + 9 + 4 + 7 + 5 + 7 + 6 + 4 + 6 + 4 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4;
+            12 + 9 + 7 + 9 + 4 + 7 + 5 + 7 + 6 + 4 + 6 + 4 + 4 + 5 + 6 + 9 + 4 + 5 + 4 + 4 + 4;
         assert_eq!(all_units().len(), expected);
     }
 
     #[test]
-    fn data_storage_uses_binary_multipliers() {
-        // 1 kb = 1024 bytes
+    fn data_storage_si_decimal_multipliers() {
+        // SI decimal per IEC 80000-13: 1 kb = 1000 bytes, 1 mb = 1e6 bytes…
         let result = convert(&bd_test("1"), "kb", "byte").unwrap();
-        eq_plain(&result, "1024");
-        // 1 mb = 1048576 bytes
+        eq_plain(&result, "1000");
         let result = convert(&bd_test("1"), "mb", "byte").unwrap();
+        eq_plain(&result, "1000000");
+        let result = convert(&bd_test("1"), "gb", "byte").unwrap();
+        eq_plain(&result, "1000000000");
+    }
+
+    #[test]
+    fn data_storage_iec_binary_multipliers() {
+        // IEC binary: 1 kib = 1024 bytes, 1 mib = 1048576 bytes…
+        let result = convert(&bd_test("1"), "kib", "byte").unwrap();
+        eq_plain(&result, "1024");
+        let result = convert(&bd_test("1"), "mib", "byte").unwrap();
         eq_plain(&result, "1048576");
+        let result = convert(&bd_test("1"), "gib", "byte").unwrap();
+        eq_plain(&result, "1073741824");
     }
 
     #[test]
