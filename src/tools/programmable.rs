@@ -132,8 +132,22 @@ fn parse_variables_string(tool: &str, json: &str) -> Result<HashMap<String, Stri
     Ok(out)
 }
 
-/// Render an `f64` matching Java's `String.valueOf(double)` / `Double.toString`.
+/// Render an `f64` result. Whole-number values print as bare integers
+/// (`"6"` not `"6.0"`) so the output shape matches `evaluateExact`, which
+/// strips the redundant decimal for integer results. Non-integer values
+/// fall back to Rust's `Debug` format, matching Java's
+/// `String.valueOf(double)` / `Double.toString`.
 fn format_double(value: f64) -> String {
+    // Print integer-valued doubles without the trailing `.0` by using
+    // `{:.0}` format — this avoids narrowing casts that `pedantic` rejects
+    // (`as i128` truncation, `i128 as f64` precision loss) while keeping
+    // exact integer appearance for values that fit in f64's 53-bit mantissa.
+    // Outside the safe integer range the decimal form carries information
+    // (magnitude, rounding) so fall back to `Debug`.
+    const SAFE_INT_F64: f64 = 9_007_199_254_740_992.0; // 2^53
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < SAFE_INT_F64 {
+        return format!("{value:.0}");
+    }
     format!("{value:?}")
 }
 
@@ -201,12 +215,15 @@ mod tests {
 
     #[test]
     fn evaluate_integer_arithmetic() {
-        assert_eq!(evaluate("2+3*4"), "EVALUATE: OK | RESULT: 14.0");
+        // Whole-number f64 results print as bare integers so the output shape
+        // matches evaluateExact (which strips the trailing `.0`). Non-integer
+        // f64 results keep their decimal form.
+        assert_eq!(evaluate("2+3*4"), "EVALUATE: OK | RESULT: 14");
     }
 
     #[test]
     fn evaluate_trig_exact() {
-        assert_eq!(evaluate("sin(90)"), "EVALUATE: OK | RESULT: 1.0");
+        assert_eq!(evaluate("sin(90)"), "EVALUATE: OK | RESULT: 1");
     }
 
     #[test]
@@ -256,7 +273,7 @@ mod tests {
     fn eval_vars_simple() {
         assert_eq!(
             evaluate_with_variables("2*x + y", r#"{"x":3,"y":1}"#),
-            "EVALUATE_WITH_VARIABLES: OK | RESULT: 7.0"
+            "EVALUATE_WITH_VARIABLES: OK | RESULT: 7"
         );
     }
 
@@ -264,7 +281,7 @@ mod tests {
     fn eval_vars_power() {
         assert_eq!(
             evaluate_with_variables("x^2", r#"{"x":5}"#),
-            "EVALUATE_WITH_VARIABLES: OK | RESULT: 25.0"
+            "EVALUATE_WITH_VARIABLES: OK | RESULT: 25"
         );
     }
 
@@ -272,7 +289,7 @@ mod tests {
     fn eval_vars_empty_object_is_valid() {
         assert_eq!(
             evaluate_with_variables("1+2", "{}"),
-            "EVALUATE_WITH_VARIABLES: OK | RESULT: 3.0"
+            "EVALUATE_WITH_VARIABLES: OK | RESULT: 3"
         );
     }
 
@@ -293,7 +310,7 @@ mod tests {
         // are accepted so callers can pass the same JSON to both tools.
         assert_eq!(
             evaluate_with_variables("x*2", r#"{"x":"5.5"}"#),
-            "EVALUATE_WITH_VARIABLES: OK | RESULT: 11.0"
+            "EVALUATE_WITH_VARIABLES: OK | RESULT: 11"
         );
     }
 
@@ -383,7 +400,7 @@ mod tests {
     fn eval_vars_float_values() {
         assert_eq!(
             evaluate_with_variables("x + y", r#"{"x":1.5,"y":2.5}"#),
-            "EVALUATE_WITH_VARIABLES: OK | RESULT: 4.0"
+            "EVALUATE_WITH_VARIABLES: OK | RESULT: 4"
         );
     }
 
