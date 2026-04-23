@@ -615,17 +615,17 @@ fn binary_to_ipv4(binary: &str) -> String {
             BINARY_TO_IP,
             ErrorCode::InvalidInput,
             "expected 4 dot-separated 8-bit groups",
-            &format!("binary={binary}"),
+            &format!("binary={binary}, groups={}", parts.len()),
         );
     }
     let mut value: i64 = 0;
-    for part in &parts {
+    for (idx, part) in parts.iter().enumerate() {
         let Ok(group) = i64::from_str_radix(part, 2) else {
             return error_with_detail(
                 BINARY_TO_IP,
                 ErrorCode::ParseError,
-                "expected 4 dot-separated 8-bit groups",
-                &format!("binary={binary}"),
+                "group contains non-binary characters or exceeds 8 bits",
+                &format!("binary={binary}, group={}, value={part}", idx + 1),
             );
         };
         value = (value << 8) | group;
@@ -642,17 +642,17 @@ fn binary_to_ipv6(binary: &str) -> String {
             BINARY_TO_IP,
             ErrorCode::InvalidInput,
             "expected 8 colon-separated 16-bit groups",
-            &format!("binary={binary}"),
+            &format!("binary={binary}, groups={}", parts.len()),
         );
     }
     let mut value = BigInt::zero();
-    for part in &parts {
+    for (idx, part) in parts.iter().enumerate() {
         let Ok(group) = u32::from_str_radix(part, 2) else {
             return error_with_detail(
                 BINARY_TO_IP,
                 ErrorCode::ParseError,
-                "expected 8 colon-separated 16-bit groups",
-                &format!("binary={binary}"),
+                "group contains non-binary characters or exceeds 16 bits",
+                &format!("binary={binary}, group={}, value={part}", idx + 1),
             );
         };
         value = (value << 16) | BigInt::from(group);
@@ -1695,8 +1695,21 @@ mod tests {
     fn error_binary_to_ipv4_group_count() {
         assert_eq!(
             binary_to_ip("1010.1010"),
-            "BINARY_TO_IP: ERROR\nREASON: [INVALID_INPUT] expected 4 dot-separated 8-bit groups\nDETAIL: binary=1010.1010"
+            "BINARY_TO_IP: ERROR\nREASON: [INVALID_INPUT] expected 4 dot-separated 8-bit groups\nDETAIL: binary=1010.1010, groups=2"
         );
+    }
+
+    #[test]
+    fn error_binary_to_ipv4_non_binary_digit() {
+        // Regression for N16: 4 dot-separated groups, but last group has a `2`.
+        // The old message lied ("expected 4 dot-separated 8-bit groups") even
+        // though the group count was fine — now it names the offending group.
+        let out = binary_to_ip("11111111.11111111.11111111.11111112");
+        assert!(out.starts_with("BINARY_TO_IP: ERROR"), "got: {out}");
+        assert!(out.contains("PARSE_ERROR"));
+        assert!(out.contains("non-binary"));
+        assert!(out.contains("group=4"));
+        assert!(out.contains("value=11111112"));
     }
 
     #[test]
