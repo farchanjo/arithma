@@ -6,8 +6,10 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-#[allow(unused_imports)]
-use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+use num_bigint::BigUint;
+use num_traits::One;
+
+use crate::mcp::message::{ErrorCode, Response, error_with_detail};
 
 const TOOL_SQRT: &str = "SQRT";
 const TOOL_LOG: &str = "LOG";
@@ -164,29 +166,40 @@ pub fn log10(number: f64) -> String {
         .build()
 }
 
-/// Compute factorial (n!) for integers in `[0, 20]`.
+/// Upper bound on factorial input. `1000!` has 2 568 digits, comfortably below
+/// the MCP envelope cap; anything larger produces payloads that are more
+/// wasteful than useful over stdio. The lower-bound cap (u64) used to truncate
+/// at `20!`; `BigUint` removes that artificial limit entirely.
+const MAX_FACTORIAL_INPUT: i64 = 1_000;
+
+/// Compute factorial (n!) for integers in `[0, 1000]`.
+///
+/// Uses arbitrary-precision integers: `20!` fits in `u64`, anything larger
+/// would overflow a primitive, so the computation runs through [`BigUint`]
+/// end-to-end.
 ///
 /// # Panics
 ///
-/// Panics only if the internal `u64::try_from` fails for a value inside the
-/// validated `0..=20` range — impossible in practice, but kept as `expect`
-/// instead of silent `as` casts so any future contract violation is loud.
+/// Panics only if the internal `u64::try_from` fails on a value already
+/// validated to be within `[0, MAX_FACTORIAL_INPUT]` — impossible in practice.
+/// Left as an `expect` instead of a silent `as` cast so any future contract
+/// violation is loud.
 #[must_use]
 pub fn factorial(num: i64) -> String {
-    if !(0..=20).contains(&num) {
+    if !(0..=MAX_FACTORIAL_INPUT).contains(&num) {
         return error_with_detail(
             TOOL_FACTORIAL,
             ErrorCode::OutOfRange,
-            "factorial is defined for integers 0..=20",
+            &format!("factorial is defined for integers 0..={MAX_FACTORIAL_INPUT}"),
             &format!("n={num}"),
         );
     }
-    let mut value: u64 = 1;
+    let mut value = BigUint::one();
     for idx in 2..=num {
-        // `num` is bounded by the `0..=20` check above, so every `idx`
-        // fits in u64 without loss — use the infallible `u64::try_from`
-        // path rather than a raw cast.
-        value *= u64::try_from(idx).expect("0..=20 fits in u64");
+        // `idx` is in `[2, MAX_FACTORIAL_INPUT]` — well within u64 — so the
+        // `try_from` path is infallible and avoids silent lossy casts.
+        let factor = u64::try_from(idx).expect("factorial input fits in u64");
+        value *= factor;
     }
     Response::ok(TOOL_FACTORIAL)
         .result(value.to_string())
@@ -328,16 +341,64 @@ mod tests {
     fn factorial_negative_reports_error() {
         assert_eq!(
             factorial(-1),
-            "FACTORIAL: ERROR\nREASON: [OUT_OF_RANGE] factorial is defined for integers 0..=20\nDETAIL: n=-1"
+            "FACTORIAL: ERROR\nREASON: [OUT_OF_RANGE] factorial is defined for integers 0..=1000\nDETAIL: n=-1"
         );
     }
 
     #[test]
     fn factorial_above_range_reports_error() {
         assert_eq!(
-            factorial(21),
-            "FACTORIAL: ERROR\nREASON: [OUT_OF_RANGE] factorial is defined for integers 0..=20\nDETAIL: n=21"
+            factorial(1001),
+            "FACTORIAL: ERROR\nREASON: [OUT_OF_RANGE] factorial is defined for integers 0..=1000\nDETAIL: n=1001"
         );
+    }
+
+    #[test]
+    fn factorial_twenty_one_now_exact_past_u64() {
+        // Regression: used to error because `u64` overflowed at 21!. With
+        // BigUint the answer is the exact 19-digit 51_090_942_171_709_440_000.
+        assert_eq!(
+            factorial(21),
+            "FACTORIAL: OK | RESULT: 51090942171709440000"
+        );
+    }
+
+    #[test]
+    fn factorial_fifty_digits_match_reference() {
+        // 50! = 30414093201713378043612608166064768844377641568960512000000000000
+        let out = factorial(50);
+        assert!(
+            out.contains("30414093201713378043612608166064768844377641568960512000000000000"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn factorial_hundred_ends_with_expected_trailing_zeros() {
+        // 100! ends in 24 trailing zeros (Legendre's formula: floor(100/5) +
+        // floor(100/25) + … = 24).
+        let out = factorial(100);
+        assert!(
+            out.starts_with("FACTORIAL: OK | RESULT: 9332621"),
+            "got: {out}"
+        );
+        // Strip the envelope and count trailing zeros on the number.
+        let number = out
+            .strip_prefix("FACTORIAL: OK | RESULT: ")
+            .expect("ok envelope");
+        let trailing_zeros = number.chars().rev().take_while(|&c| c == '0').count();
+        assert_eq!(trailing_zeros, 24, "got: {out}");
+    }
+
+    #[test]
+    fn factorial_max_input_fits_in_payload() {
+        let out = factorial(MAX_FACTORIAL_INPUT);
+        assert!(out.starts_with("FACTORIAL: OK | RESULT: "), "got: {out}");
+        let number = out
+            .strip_prefix("FACTORIAL: OK | RESULT: ")
+            .expect("ok envelope");
+        // 1000! has exactly 2568 decimal digits.
+        assert_eq!(number.len(), 2568, "got length: {}", number.len());
     }
 
     // ---- sin ----
