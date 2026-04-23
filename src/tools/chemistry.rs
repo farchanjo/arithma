@@ -121,28 +121,57 @@ fn parse_formula(formula: &str) -> Result<HashMap<String, u32>, String> {
     Ok(counts)
 }
 
+/// Paired brackets the parser treats as group delimiters. Parentheses are
+/// canonical; square brackets accept coordination-complex notation like
+/// `K4[Fe(CN)6]`. Both pairs must balance (a `[` can't close with `)`).
+const fn closing_bracket_for(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        _ => None,
+    }
+}
+
+/// Hydrate separators common in chemistry literature. `CuSO4·5H2O` and
+/// `CuSO4.5H2O` both mean anhydrous salt plus five waters — the parser reads
+/// the remainder of the formula as a multiplied block.
+const fn is_hydrate_separator(ch: char) -> bool {
+    ch == '·' || ch == '.'
+}
+
 fn parse_group(
     chars: &[char],
     pos: &mut usize,
-    inside_paren: bool,
+    inside_bracket: bool,
 ) -> Result<HashMap<String, u32>, String> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     while *pos < chars.len() {
         let ch = chars[*pos];
-        if ch == '(' {
+        if let Some(close) = closing_bracket_for(ch) {
             *pos += 1;
             let sub = parse_group(chars, pos, true)?;
-            if *pos >= chars.len() || chars[*pos] != ')' {
-                return Err(format!("missing ')' near position {pos}"));
+            if *pos >= chars.len() || chars[*pos] != close {
+                return Err(format!("missing '{close}' near position {pos}"));
             }
             *pos += 1;
             let mult = parse_count(chars, pos);
             for (el, n) in sub {
                 *counts.entry(el).or_insert(0) += n * mult;
             }
-        } else if ch == ')' {
-            if !inside_paren {
-                return Err(format!("unexpected ')' at position {pos}"));
+        } else if ch == ')' || ch == ']' {
+            if !inside_bracket {
+                return Err(format!("unexpected '{ch}' at position {pos}"));
+            }
+            return Ok(counts);
+        } else if is_hydrate_separator(ch) {
+            // `·n` (or `.n`) starts a hydrate block: multiply the remainder of
+            // the formula by `n` and merge. Nested `·/·` work naturally via
+            // recursion since parse_group consumes everything left.
+            *pos += 1;
+            let mult = parse_count(chars, pos);
+            let sub = parse_group(chars, pos, inside_bracket)?;
+            for (el, n) in sub {
+                *counts.entry(el).or_insert(0) += n * mult;
             }
             return Ok(counts);
         } else if ch.is_ascii_uppercase() {
@@ -565,6 +594,47 @@ mod tests {
         assert_eq!(title_case_formula("h2o"), "H2O");
         assert_eq!(title_case_formula("ca(oh)2"), "Ca(Oh)2");
         assert_eq!(title_case_formula("H2O"), "H2O");
+    }
+
+    #[test]
+    fn molar_mass_square_brackets() {
+        // K4[Fe(CN)6] = potassium ferrocyanide. Bracket groups treated the
+        // same as parenthesised groups but must balance (no cross-matching).
+        let out = molar_mass("K4[Fe(CN)6]");
+        assert!(out.starts_with("MOLAR_MASS: OK"), "got: {out}");
+        // K4Fe(CN)6 breakdown: K=4, Fe=1, C=6, N=6
+        assert!(out.contains("K4="), "expected K4 in breakdown: {out}");
+        assert!(out.contains("Fe1="));
+        assert!(out.contains("C6="));
+        assert!(out.contains("N6="));
+    }
+
+    #[test]
+    fn molar_mass_bracket_mismatch_is_error() {
+        // `(` cannot close with `]` — mismatched brackets must surface.
+        let out = molar_mass("Ca(OH]2");
+        assert!(out.starts_with("MOLAR_MASS: ERROR"));
+    }
+
+    #[test]
+    fn molar_mass_hydrate_middle_dot() {
+        // CuSO4·5H2O = copper(II) sulfate pentahydrate.
+        let out = molar_mass("CuSO4·5H2O");
+        assert!(out.starts_with("MOLAR_MASS: OK"), "got: {out}");
+        // Cu=1, S=1, O=4+5=9, H=10
+        assert!(out.contains("Cu1="), "Cu1 missing: {out}");
+        assert!(out.contains("S1="));
+        assert!(out.contains("O9="));
+        assert!(out.contains("H10="));
+    }
+
+    #[test]
+    fn molar_mass_hydrate_period() {
+        // ASCII period is a common alternative to the middle dot.
+        let out = molar_mass("CuSO4.5H2O");
+        assert!(out.starts_with("MOLAR_MASS: OK"), "got: {out}");
+        assert!(out.contains("O9="));
+        assert!(out.contains("H10="));
     }
 
     #[test]
