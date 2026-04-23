@@ -36,6 +36,34 @@ fn eval_at(tool: &str, expression: &str, variable: &str, x: f64) -> Result<f64, 
     evaluate_with_variables(expression, &vars).map_err(|e| map_expression_error(tool, &e))
 }
 
+/// Outcome of a single-point evaluation used by plot/find-roots.
+///
+/// * `Value(y)` — finite, in-domain sample.
+/// * `Undefined` — pole (`1/0`), domain excursion (`log(-1)`), or non-finite
+///   result. Surfaces as `y = NaN` in plots and a continuity break in root
+///   scans, instead of aborting the whole response.
+enum SampleKind {
+    Value(f64),
+    Undefined,
+}
+
+/// Try to evaluate at `x`, classifying pointwise singularities as `Undefined`
+/// so scanners can keep going. Structural errors (parse, unknown variable,
+/// unknown function) are still fatal — they affect every sample, so surfacing
+/// the first is the right behaviour.
+fn try_sample(expression: &str, variable: &str, x: f64) -> Result<SampleKind, ExpressionError> {
+    let mut vars = HashMap::with_capacity(1);
+    vars.insert(variable.to_string(), x);
+    match evaluate_with_variables(expression, &vars) {
+        Ok(y) if y.is_finite() => Ok(SampleKind::Value(y)),
+        Ok(_) => Ok(SampleKind::Undefined),
+        Err(ExpressionError::DivisionByZero | ExpressionError::DomainError { .. }) => {
+            Ok(SampleKind::Undefined)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 // --------------------------------------------------------------------------- //
 //  plot_function
 // --------------------------------------------------------------------------- //
@@ -67,7 +95,13 @@ fn sample_plot(
     for idx in 0..=steps {
         let x_bd = &bd_min + &step_size * BigDecimal::from(idx);
         let x = x_bd.to_f64().unwrap_or(f64::NAN);
-        let y = eval_at(tool, expression, variable, x)?;
+        let y = match try_sample(expression, variable, x) {
+            Ok(SampleKind::Value(v)) => v,
+            // Pointwise singularity (e.g. `1/x` at x=0, `log(x)` at x<=0):
+            // emit NaN instead of aborting the entire plot.
+            Ok(SampleKind::Undefined) => f64::NAN,
+            Err(e) => return Err(map_expression_error(tool, &e)),
+        };
         rows.push((x, y));
     }
     Ok(rows)
@@ -177,35 +211,44 @@ pub fn find_roots(expression: &str, variable: &str, min: f64, max: f64) -> Strin
     let step = (max - min) / f64::from(SCAN_DIVISIONS);
     let mut roots: Vec<f64> = Vec::new();
 
-    let mut prev_x = min;
-    let mut prev_f = match eval_at(tool, expression, variable, prev_x) {
-        Ok(v) => v,
-        Err(msg) => return msg,
+    // `prev` is None whenever the previous sample was a singularity or out of
+    // domain — a sign change across a pole is not a real root, so the scanner
+    // only compares sign changes across two consecutive *defined* samples.
+    let mut prev: Option<(f64, f64)> = match try_sample(expression, variable, min) {
+        Ok(SampleKind::Value(y)) => {
+            if y.abs() < NEWTON_TOLERANCE {
+                roots.push(min);
+            }
+            Some((min, y))
+        }
+        Ok(SampleKind::Undefined) => None,
+        Err(e) => return map_expression_error(tool, &e),
     };
-
-    if prev_f.abs() < NEWTON_TOLERANCE {
-        roots.push(prev_x);
-    }
 
     for idx in 1..=SCAN_DIVISIONS {
         let offset = f64::from(idx) * step;
         let current_x = min + offset;
-        let current_f = match eval_at(tool, expression, variable, current_x) {
-            Ok(v) => v,
-            Err(msg) => return msg,
+        let current_f = match try_sample(expression, variable, current_x) {
+            Ok(SampleKind::Value(v)) => v,
+            Ok(SampleKind::Undefined) => {
+                prev = None;
+                continue;
+            }
+            Err(e) => return map_expression_error(tool, &e),
         };
 
         if current_f.abs() < NEWTON_TOLERANCE {
             push_unique(&mut roots, current_x);
-        } else if prev_f * current_f < 0.0 {
+        } else if let Some((prev_x, prev_f)) = prev
+            && prev_f * current_f < 0.0
+        {
             match bisect(tool, expression, variable, prev_x, current_x) {
                 Ok(root) => push_unique(&mut roots, root),
                 Err(msg) => return msg,
             }
         }
 
-        prev_x = current_x;
-        prev_f = current_f;
+        prev = Some((current_x, current_f));
     }
 
     let count = roots.len();
@@ -310,6 +353,35 @@ ROW_5: x=2.0 | y=4.0";
             plot_function("x", "x", 1.0, 1.0, 10),
             "PLOT_FUNCTION: ERROR\nREASON: [INVALID_INPUT] min must be less than max\nDETAIL: min=1 | max=1"
         );
+    }
+
+    #[test]
+    fn plot_samples_pole_emit_nan_not_abort() {
+        // `1/x` has a pole at x=0 — the rest of the plot must still be drawn.
+        let out = plot_function("1/x", "x", -1.0, 1.0, 4);
+        assert!(out.starts_with("PLOT_FUNCTION: OK"), "got: {out}");
+        assert!(out.contains("y=NaN"), "expected NaN at pole, got: {out}");
+        // Endpoints should still be evaluated (1/-1 = -1, 1/1 = 1).
+        assert!(out.contains("x=-1.0 | y=-1.0"));
+        assert!(out.contains("x=1.0 | y=1.0"));
+    }
+
+    #[test]
+    fn plot_out_of_domain_points_emit_nan_not_abort() {
+        // `log(x)` is undefined for x<=0; the in-domain half of the plot
+        // must survive.
+        let out = plot_function("log(x)", "x", -1.0, 2.0, 3);
+        assert!(out.starts_with("PLOT_FUNCTION: OK"), "got: {out}");
+        assert!(out.contains("y=NaN"));
+    }
+
+    #[test]
+    fn find_roots_ignores_pole_sign_change() {
+        // `1/x` changes sign across x=0 but has no real root there — the
+        // old scanner aborted with DIVISION_BY_ZERO. Now it reports 0 roots.
+        let out = find_roots("1/x", "x", -2.0, 2.0);
+        assert!(out.starts_with("FIND_ROOTS: OK"), "got: {out}");
+        assert!(out.contains("COUNT: 0"));
     }
 
     #[test]
