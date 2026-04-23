@@ -145,11 +145,32 @@ fn snap_to_zero(primary: f64, companion: f64) -> f64 {
     }
 }
 
+/// Snap a value to the nearest integer when the distance is within
+/// `1e-12 · max(|v|, 1)`. De Moivre power tricks leave `(1+i)^8 = 16` as
+/// `16.000000000000007`; this one-ulp cleanup brings the result back to
+/// the textbook integer without affecting genuine non-integers (which
+/// diverge from their nearest integer by far more than the threshold).
+fn snap_near_integer(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    let rounded = value.round();
+    let delta = (value - rounded).abs();
+    let scale = value.abs().max(1.0);
+    if delta <= 1e-12 * scale {
+        rounded
+    } else {
+        value
+    }
+}
+
 fn ok_complex(tool: &str, c: C) -> String {
-    // Snap near-zero components driven by trig noise so `complexSqrt(-1)`
-    // reports `REAL: 0.0 | IMAG: 1.0` instead of `REAL: 6.123…e-17 | IMAG: 1.0`.
-    let re = snap_to_zero(c.re, c.im);
-    let im = snap_to_zero(c.im, c.re);
+    // Two-stage cleanup for numerical residue:
+    // 1. Snap near-zero components (trig round-trips).
+    // 2. Snap the remaining value to the nearest integer when within one
+    //    relative ulp — covers `(1+i)^8 = 16` / `e^(iπ) = -1` etc.
+    let re = snap_near_integer(snap_to_zero(c.re, c.im));
+    let im = snap_near_integer(snap_to_zero(c.im, c.re));
     Response::ok(tool)
         .field("REAL", fmt(re))
         .field("IMAG", fmt(im))
@@ -437,6 +458,25 @@ mod tests {
         // Consistent with rect_to_polar(0,0) and Python cmath.phase(0j).
         let out = complex_phase("0,0");
         assert!(out.contains("RESULT: 0.0"), "got {out}");
+    }
+
+    #[test]
+    fn complex_power_snaps_to_integer() {
+        // (1+i)^8 = 16 exact mathematically; De Moivre via cos/sin leaks
+        // 7e-15 residue in the real part and a matching 7e-15 in imag.
+        // The snap cleanup brings both to their textbook values.
+        let out = complex_power("1,1", "8");
+        assert!(out.contains("REAL: 16.0"), "got {out}");
+        assert!(out.contains("IMAG: 0.0"), "got {out}");
+    }
+
+    #[test]
+    fn polar_to_rect_53deg_gives_clean_345() {
+        // 5·(cos 53.13°, sin 53.13°) → (3, 4) — the 3-4-5 right triangle.
+        // Without the snap, IMAG printed as 3.9999999999999996.
+        let out = polar_to_rect("5", "53.13010235415598");
+        assert!(out.contains("REAL: 3.0"), "got {out}");
+        assert!(out.contains("IMAG: 4.0"), "got {out}");
     }
 
     #[test]
