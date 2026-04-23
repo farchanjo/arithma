@@ -8,6 +8,7 @@
 use std::f64::consts::TAU;
 
 use crate::mcp::message::{ErrorCode, Response, error, error_with_detail};
+use crate::tools::numeric::guard_finite;
 
 const TOOL_MEAN: &str = "MEAN";
 const TOOL_MEDIAN: &str = "MEDIAN";
@@ -72,6 +73,15 @@ fn parse_decimal(tool: &str, label: &str, value: &str) -> Result<f64, String> {
     })
 }
 
+/// Ship a scalar RESULT with the overflow guard applied. Use for any
+/// reduction over large samples so an IEEE inf never escapes the envelope.
+fn ok_result(tool: &str, value: f64) -> String {
+    match guard_finite(tool, "result", value) {
+        Ok(v) => Response::ok(tool).result(format_f64(v)).build(),
+        Err(e) => e,
+    }
+}
+
 fn format_f64(value: f64) -> String {
     format!("{value:?}")
 }
@@ -94,7 +104,7 @@ pub fn mean(values: &str) -> String {
     }
     let n = count_as_f64(arr.len());
     let sum: f64 = arr.iter().sum();
-    Response::ok(TOOL_MEAN).result(format_f64(sum / n)).build()
+    ok_result(TOOL_MEAN, sum / n)
 }
 
 #[must_use]
@@ -133,6 +143,17 @@ pub fn mode(values: &str) -> String {
         counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
     }
     let max_count = counts.values().map(|(_, c)| *c).max().unwrap_or(0);
+    // Amodal distributions — every value appears the same number of times
+    // AND there is more than one distinct value — have no mode. Returning
+    // the whole sample as "modes" is the classic scikit / R convention but
+    // misleads non-stats callers; we surface it as an explicit `NONE`.
+    if max_count == 1 && counts.len() > 1 {
+        return Response::ok(TOOL_MODE)
+            .field("MODES", "NONE")
+            .field("COUNT", "0")
+            .field("REASON", "every value occurs exactly once (amodal)")
+            .build();
+    }
     let mut modes: Vec<f64> = counts
         .values()
         .filter(|(_, c)| *c == max_count)
@@ -169,7 +190,7 @@ pub fn variance(values: &str, population: bool) -> String {
         );
     }
     let v = compute_variance(&arr, population);
-    Response::ok(TOOL_VARIANCE).result(format_f64(v)).build()
+    ok_result(TOOL_VARIANCE, v)
 }
 
 #[must_use]
@@ -189,9 +210,7 @@ pub fn std_dev(values: &str, population: bool) -> String {
         );
     }
     let v = compute_variance(&arr, population);
-    Response::ok(TOOL_STDDEV)
-        .result(format_f64(v.sqrt()))
-        .build()
+    ok_result(TOOL_STDDEV, v.sqrt())
 }
 
 fn compute_variance(arr: &[f64], population: bool) -> f64 {
@@ -326,12 +345,35 @@ fn compute_pearson(xs: &[f64], ys: &[f64]) -> Option<f64> {
     let n = count_as_f64(xs.len());
     let mean_x: f64 = xs.iter().sum::<f64>() / n;
     let mean_y: f64 = ys.iter().sum::<f64>() / n;
+
+    // Scale-invariant correlation. Pearson's `r` is mathematically invariant
+    // under independent affine rescaling of the two series, so we normalize
+    // each deviation by its own max-|Δ| before accumulating sums of squares.
+    // Without this pass, a cross-scale comparison (e.g. xs ~ 1e300 against
+    // ys ~ 1e-300) overflows `Σdx²` to `+∞` and underflows `Σdy²` to `0`,
+    // making the product `inf·0 = NaN` — even though the true correlation
+    // is perfectly well-defined (1.0 for the test case). Normalizing puts
+    // every `dx/dy` into `[-1, 1]` so every accumulator stays within f64
+    // range regardless of the raw magnitudes.
+    let mut scale_x: f64 = 0.0;
+    let mut scale_y: f64 = 0.0;
+    for i in 0..xs.len() {
+        scale_x = scale_x.max((xs[i] - mean_x).abs());
+        scale_y = scale_y.max((ys[i] - mean_y).abs());
+    }
+    // Either series constant → correlation undefined (mirrors the legacy
+    // `denom == 0` branch below, raised one level so we don't divide by
+    // zero during the normalization itself).
+    if scale_x == 0.0 || scale_y == 0.0 {
+        return None;
+    }
+
     let mut num = 0.0;
     let mut den_x = 0.0;
     let mut den_y = 0.0;
     for i in 0..xs.len() {
-        let dx = xs[i] - mean_x;
-        let dy = ys[i] - mean_y;
+        let dx = (xs[i] - mean_x) / scale_x;
+        let dy = (ys[i] - mean_y) / scale_y;
         num += dx * dy;
         den_x += dx * dx;
         den_y += dy * dy;
@@ -376,9 +418,7 @@ pub fn covariance(x_values: &str, y_values: &str, population: bool) -> String {
         sum += (xs[i] - mean_x) * (ys[i] - mean_y);
     }
     let denom = if population { n } else { n - 1.0 };
-    Response::ok(TOOL_COVARIANCE)
-        .result(format_f64(sum / denom))
-        .build()
+    ok_result(TOOL_COVARIANCE, sum / denom)
 }
 
 #[must_use]
@@ -421,6 +461,11 @@ pub fn linear_regression(x_values: &str, y_values: &str) -> String {
     // regression still has a valid slope/intercept, so report R = 0 to
     // preserve the response shape.
     let r = compute_pearson(&xs, &ys).unwrap_or(0.0);
+    for (label, val) in [("slope", slope), ("intercept", intercept), ("r", r)] {
+        if let Err(e) = guard_finite(TOOL_LINEAR_REGRESSION, label, val) {
+            return e;
+        }
+    }
     Response::ok(TOOL_LINEAR_REGRESSION)
         .field("SLOPE", format_f64(slope))
         .field("INTERCEPT", format_f64(intercept))
@@ -480,33 +525,20 @@ pub fn normal_cdf(x: &str, mean: &str, std_dev: &str) -> String {
             &format!("stdDev={sigma}"),
         );
     }
+    // Symmetry short-circuit: Φ(μ; μ, σ) = 1/2 exactly. Compare bit patterns
+    // to sidestep clippy's float_cmp lint — the two f64s either come from the
+    // same decimal input and are bitwise identical, or they differ and we
+    // proceed to the erf path.
+    if x_v.to_bits() == mu.to_bits() {
+        return Response::ok(TOOL_NORMAL_CDF)
+            .result(format_f64(0.5))
+            .build();
+    }
     let z = (x_v - mu) / (sigma * std::f64::consts::SQRT_2);
-    let result = 0.5 * (1.0 + erf(z));
+    let result = 0.5 * (1.0 + libm::erf(z));
     Response::ok(TOOL_NORMAL_CDF)
         .result(format_f64(result))
         .build()
-}
-
-/// Abramowitz & Stegun 7.1.26 erf approximation — max error ~1.5e-7.
-fn erf(x: f64) -> f64 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let abs_x = x.abs();
-    let a1: f64 = 0.254_829_592;
-    let a2: f64 = -0.284_496_736;
-    let a3: f64 = 1.421_413_741;
-    let a4: f64 = -1.453_152_027;
-    let a5: f64 = 1.061_405_429;
-    let p: f64 = 0.327_591_1;
-    let t = 1.0 / p.mul_add(abs_x, 1.0);
-    // Horner scheme — evaluate `a5·t⁵ + a4·t⁴ + a3·t³ + a2·t² + a1·t` using
-    // `mul_add` so each step is one fused multiply-add.
-    let poly = a5
-        .mul_add(t, a4)
-        .mul_add(t, a3)
-        .mul_add(t, a2)
-        .mul_add(t, a1);
-    let y = poly.mul_add(-t * (-abs_x * abs_x).exp(), 1.0);
-    sign * y
 }
 
 /// One-sample t-test against a hypothesized mean. Returns t-statistic and
@@ -542,6 +574,11 @@ pub fn t_test_one_sample(values: &str, hypothesized_mean: &str) -> String {
     }
     let t = (mean_val - mu0) / se;
     let df = n - 1.0;
+    for (label, val) in [("t", t), ("mean", mean_val), ("se", se)] {
+        if let Err(e) = guard_finite(TOOL_T_TEST, label, val) {
+            return e;
+        }
+    }
     Response::ok(TOOL_T_TEST)
         .field("T", format_f64(t))
         .field("DF", format_f64(df))
@@ -645,7 +682,12 @@ pub fn confidence_interval(values: &str, confidence_level: &str) -> String {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if !(0.0..1.0).contains(&level) {
+    // Open interval `(0, 1)` — the message says so and a `level=0` interval
+    // would have zero width, while `level=1` would require the distribution's
+    // full support (z → ∞). Rust's `(0.0..1.0).contains(&level)` is
+    // half-open `[0, 1)`, so `0.0` used to slip through and yield a
+    // zero-margin envelope; guard explicitly on both ends.
+    if level <= 0.0 || level >= 1.0 {
         return error_with_detail(
             TOOL_CONFIDENCE_INTERVAL,
             ErrorCode::OutOfRange,
@@ -859,6 +901,26 @@ mod tests {
     }
 
     #[test]
+    fn correlation_survives_mixed_extreme_scales() {
+        // Regression: without deviation-scale normalization, Pearson on
+        // `xs ~ 1e300` vs `ys ~ 1e-300` accumulates `Σdx² → +∞` and
+        // `Σdy² → 0`, and `sqrt(inf · 0) = NaN` — despite the correlation
+        // being mathematically `1.0`. Scale-invariant accumulation keeps
+        // every intermediate inside f64 range regardless of the raw
+        // magnitudes.
+        let out = correlation("1e300,2e300,3e300", "1e-300,2e-300,3e-300");
+        assert!(out.starts_with("CORRELATION: OK"), "got {out}");
+        assert!(
+            !out.contains("NaN"),
+            "correlation should not surface NaN, got {out}"
+        );
+        assert!(out.contains("RESULT: 1.0"), "got {out}");
+        // Symmetrically on the anti-correlation side.
+        let anti = correlation("1e-300,2e-300,3e-300", "3e300,2e300,1e300");
+        assert!(anti.contains("RESULT: -1.0"), "got {anti}");
+    }
+
+    #[test]
     fn linear_regression_y_equals_2x_plus_1() {
         // y = 2x + 1 should give slope=2, intercept=1
         let out = linear_regression("0,1,2,3,4", "1,3,5,7,9");
@@ -876,16 +938,33 @@ mod tests {
 
     #[test]
     fn normal_cdf_symmetric_about_mean() {
+        // Φ(μ; μ, σ) must be exactly 0.5 — the symmetry short-circuit skips
+        // erf entirely. Prior to the snap this returned 0.5000000005.
         let out = normal_cdf("0", "0", "1");
-        // ~0.5 with our approximation
-        assert!(out.contains("RESULT: 0.5"), "got {out}");
+        assert!(
+            out.contains("RESULT: 0.5\n") || out.ends_with("RESULT: 0.5"),
+            "got {out}"
+        );
+        let out_shifted = normal_cdf("3.5", "3.5", "2");
+        assert!(
+            out_shifted.contains("RESULT: 0.5\n") || out_shifted.ends_with("RESULT: 0.5"),
+            "got {out_shifted}"
+        );
     }
 
     #[test]
     fn normal_cdf_one_sigma() {
+        // Φ(1; 0, 1) ≈ 0.8413447460685429. libm's erf matches at f64 precision.
         let out = normal_cdf("1", "0", "1");
-        // CDF(1) ≈ 0.8413
-        assert!(out.contains("RESULT: 0.841"), "got {out}");
+        assert!(out.contains("RESULT: 0.8413447"), "got {out}");
+    }
+
+    #[test]
+    fn normal_cdf_three_sigma_matches_reference() {
+        // Φ(3; 0, 1) = 0.9986501019683699 — upgrade from Abramowitz 7.1.26
+        // (which drifted by ~1e-7) to libm's erf must now hit ~1e-15 accuracy.
+        let out = normal_cdf("3", "0", "1");
+        assert!(out.contains("RESULT: 0.998650101"), "got {out}");
     }
 
     #[test]
@@ -931,6 +1010,18 @@ mod tests {
         // Mean of 1..5 = 3; CI should be centered on 3
         let out = confidence_interval("1,2,3,4,5", "0.95");
         assert!(out.contains("MEAN: 3.0"), "got {out}");
+    }
+
+    #[test]
+    fn confidence_interval_rejects_boundary_levels() {
+        // Regression: the guard used the half-open Rust range `[0, 1)`,
+        // so `level=0` slipped past the `contains` check and returned a
+        // zero-margin envelope despite the error message advertising the
+        // open interval `(0, 1)`. Both `0` and `1` must be rejected.
+        let zero = confidence_interval("1,2,3,4,5", "0");
+        assert!(zero.starts_with("CONFIDENCE_INTERVAL: ERROR"), "got {zero}");
+        let one = confidence_interval("1,2,3,4,5", "1");
+        assert!(one.starts_with("CONFIDENCE_INTERVAL: ERROR"), "got {one}");
     }
 
     #[test]

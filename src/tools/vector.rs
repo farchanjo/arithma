@@ -51,6 +51,26 @@ fn ok_result(tool: &str, value: String) -> String {
     Response::ok(tool).result(value).build()
 }
 
+/// Convert a silently-saturating IEEE ±∞ or NaN into a structured OVERFLOW
+/// error. Input elements themselves may be ±∞ (already flagged at parse time
+/// would surprise callers), so we only check the reduced accumulator.
+fn guard_overflow(tool: &str, result: f64) -> Option<String> {
+    if result.is_finite() {
+        return None;
+    }
+    let reason = if result.is_nan() {
+        "result is NaN — an intermediate computation is undefined"
+    } else {
+        "result exceeds the f64 finite range"
+    };
+    Some(error_with_detail(
+        tool,
+        ErrorCode::Overflow,
+        reason,
+        &format!("result={result:?}"),
+    ))
+}
+
 /// Sum all elements of a numeric array.
 #[must_use]
 pub fn sum_array(numbers: &str) -> String {
@@ -79,6 +99,9 @@ pub fn sum_array(numbers: &str) -> String {
     while idx < array.len() {
         result += array[idx];
         idx += 1;
+    }
+    if let Some(err) = guard_overflow(TOOL_SUM_ARRAY, result) {
+        return err;
     }
     ok_result(TOOL_SUM_ARRAY, format_f64(result))
 }
@@ -135,6 +158,9 @@ pub fn dot_product(first: &str, second: &str) -> String {
         result += array_a[idx] * array_b[idx];
         idx += 1;
     }
+    if let Some(err) = guard_overflow(TOOL_DOT_PRODUCT, result) {
+        return err;
+    }
     ok_result(TOOL_DOT_PRODUCT, format_f64(result))
 }
 
@@ -181,6 +207,15 @@ pub fn scale_array(numbers: &str, scalar: &str) -> String {
         idx += 1;
     }
 
+    if let Some(bad) = result.iter().copied().find(|v| !v.is_finite()) {
+        return error_with_detail(
+            TOOL_SCALE_ARRAY,
+            ErrorCode::Overflow,
+            "scaling produced a non-finite element (overflow/underflow to ±∞ or NaN)",
+            &format!("element={bad:?}, scalar={factor}"),
+        );
+    }
+
     let csv = result
         .iter()
         .map(|val| format_f64(*val))
@@ -190,6 +225,18 @@ pub fn scale_array(numbers: &str, scalar: &str) -> String {
 }
 
 /// Euclidean norm (magnitude) of a vector: `sqrt(sum(x²))`.
+///
+/// Uses a scale-protected two-pass algorithm to avoid intermediate
+/// overflow/underflow: the naive `sum(x²)` overflows to `+∞` as soon as any
+/// `|x_i| > ~1.3e154` (because `|x_i|² > f64::MAX`) and underflows to `0`
+/// when every `|x_i| < ~1.5e-154`. Both produce catastrophically wrong
+/// answers for vectors whose actual magnitude is perfectly representable
+/// in `f64` (`‖(3e200, 4e200)‖ = 5e200`, well within range).
+///
+/// The scaled form `M · √Σ(x_i/M)²` — with `M = max|x_i|` — keeps every
+/// squared term inside `[0, 1]`, matching the approach used by `distance2D`,
+/// `distance3D`, and `complexMagnitude`. SIMD is preserved inside the
+/// scaled sum so the happy path stays vectorized.
 #[must_use]
 pub fn magnitude_array(numbers: &str) -> String {
     let array = match parse_array(TOOL_MAGNITUDE_ARRAY, "numbers", numbers) {
@@ -204,21 +251,39 @@ pub fn magnitude_array(numbers: &str) -> String {
         );
     }
 
+    let max_abs = array.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    if max_abs == 0.0 {
+        return ok_result(TOOL_MAGNITUDE_ARRAY, format_f64(0.0));
+    }
+    if !max_abs.is_finite() {
+        // A single non-finite component already forces an infinite magnitude
+        // — short-circuit so the scaled-sum path is never fed a NaN ratio.
+        return ok_result(TOOL_MAGNITUDE_ARRAY, format_f64(f64::INFINITY));
+    }
+
+    let inv_max = 1.0 / max_abs;
+    let scale_lanes = f64x4::splat(inv_max);
     let mut acc = f64x4::splat(0.0);
     let lanes = 4;
     let bound = array.len() - (array.len() % lanes);
     let mut idx = 0;
     while idx < bound {
-        let vector_a = f64x4::new([array[idx], array[idx + 1], array[idx + 2], array[idx + 3]]);
+        let vector_a =
+            f64x4::new([array[idx], array[idx + 1], array[idx + 2], array[idx + 3]]) * scale_lanes;
         acc += vector_a * vector_a;
         idx += lanes;
     }
     let mut sum_of_squares = acc.reduce_add();
     while idx < array.len() {
-        sum_of_squares += array[idx] * array[idx];
+        let scaled = array[idx] * inv_max;
+        sum_of_squares += scaled * scaled;
         idx += 1;
     }
-    ok_result(TOOL_MAGNITUDE_ARRAY, format_f64(sum_of_squares.sqrt()))
+    let magnitude = max_abs * sum_of_squares.sqrt();
+    if let Some(err) = guard_overflow(TOOL_MAGNITUDE_ARRAY, magnitude) {
+        return err;
+    }
+    ok_result(TOOL_MAGNITUDE_ARRAY, format_f64(magnitude))
 }
 
 // --------------------------------------------------------------------------- //
@@ -359,5 +424,52 @@ mod tests {
             magnitude_array(""),
             "MAGNITUDE_ARRAY: ERROR\nREASON: [INVALID_INPUT] input array must not be empty"
         );
+    }
+
+    #[test]
+    fn magnitude_array_large_components_no_overflow() {
+        // Regression: the naive `sum(x²)` formula returns `+∞` for any
+        // component `> ~1.3e154` because `x²` exceeds `f64::MAX`. The
+        // actual magnitude `‖(3e200, 4e200)‖ = 5e200` is perfectly
+        // representable — scale protection recovers it.
+        let out = magnitude_array("3e200,4e200");
+        assert!(out.contains("5e200"), "got {out}");
+        assert!(!out.contains("inf"), "got {out}");
+
+        // ‖(1e300, 1e300)‖ = √2 · 1e300 ≈ 1.4142…e300. Prefix-match to 14
+        // digits so last-ULP drift between f64 representations of √2 (the
+        // SIMD reduction can land on `…951` or `…952` depending on order)
+        // doesn't make the test brittle.
+        let out2 = magnitude_array("1e300,1e300");
+        assert!(out2.contains("1.41421356237309"), "got {out2}");
+        assert!(out2.ends_with("e300"), "got {out2}");
+    }
+
+    #[test]
+    fn magnitude_array_tiny_components_no_underflow() {
+        // Regression: `(1e-200)² = 1e-400` flushes to denormal zero, so the
+        // naive sum collapses to `0` even though the magnitude
+        // `√2 · 1e-200` is representable. Scale protection restores it.
+        let out = magnitude_array("1e-200,1e-200");
+        assert!(!out.contains("RESULT: 0\n"), "got {out}");
+        assert!(out.contains("1.41421356237309"), "got {out}");
+        assert!(out.ends_with("e-200"), "got {out}");
+    }
+
+    #[test]
+    fn magnitude_array_pythagorean_scaled() {
+        // `‖(5e150, 12e150)‖ = 1.3e151` — the scaled algorithm gives
+        // `1.2999…e151` after SIMD reduction, one ULP below exact 1.3e151.
+        // Parse the numeric part and compare by relative tolerance so a
+        // future change in reduction order doesn't fail this test.
+        let out = magnitude_array("5e150,12e150");
+        let value: f64 = out
+            .strip_prefix("MAGNITUDE_ARRAY: OK | RESULT: ")
+            .and_then(|rest| rest.split(char::is_whitespace).next())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("could not parse value from {out}"));
+        let expected = 1.3e151_f64;
+        let relative = (value - expected).abs() / expected;
+        assert!(relative < 1e-14, "got {value}, expected {expected}");
     }
 }
