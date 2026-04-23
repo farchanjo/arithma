@@ -340,6 +340,30 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_exact_large_exponent_fractional_base_converges_to_e() {
+        // `(1 + 1/n)^n → e`. The naive repeated-multiplication path used to
+        // return OVERFLOW because the decimal scale ballooned; the BigFloat
+        // fallback converges. Don't pin the full string (platform float
+        // formatting varies); just check the magnitude.
+        let out = evaluate_exact("(1 + 1/1000000)^1000000");
+        assert!(
+            out.starts_with("EVALUATE_EXACT: OK"),
+            "expected OK, got: {out}"
+        );
+        assert!(out.contains("2.71828"), "expected ~e, got: {out}");
+    }
+
+    #[test]
+    fn evaluate_exact_power_small_integer_stays_exact() {
+        // Regression: small integer exponents must still use the exact
+        // BigDecimal path — any drift here would corrupt every integer power.
+        assert_eq!(
+            evaluate_exact("2^64"),
+            "EVALUATE_EXACT: OK | RESULT: 18446744073709551616"
+        );
+    }
+
+    #[test]
     fn eval_vars_unknown_variable_is_error() {
         assert_eq!(
             evaluate_with_variables("z + 1", r#"{"x":1}"#),

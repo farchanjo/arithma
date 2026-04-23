@@ -197,42 +197,27 @@ fn finite_or_domain(bf: &BigFloat, op: &str, value: &BigDecimal) -> Result<(), E
     Ok(())
 }
 
-/// Rejects integer-exponent powers whose printed result would blow past
-/// [`MAX_POWER_RESULT_LEN`]. Zero or `|base| <= 1` short-circuit (the result
-/// stays small regardless of exp), which also avoids false positives on
-/// bases like `1` or `0.1`.
-fn guard_integer_power_size(base: &BigDecimal, exp: u32) -> Result<(), ExpressionError> {
+/// Decide whether an integer-exponent power can stay exact. Zero / `|base| <= 1`
+/// short-circuit (the result stays small regardless of exp). Otherwise the
+/// printed result length is bounded by `base_len * exp`; anything above
+/// [`MAX_POWER_RESULT_LEN`] would blow up both memory and output size.
+fn integer_power_fits(base: &BigDecimal, exp: u32) -> bool {
     if exp == 0 || base.is_zero() {
-        return Ok(());
+        return true;
     }
     let base_len = base.to_plain_string().len() as u64;
-    let estimated = base_len.saturating_mul(u64::from(exp));
-    if estimated > MAX_POWER_RESULT_LEN {
-        return Err(ExpressionError::Overflow { op: "^".into() });
-    }
-    Ok(())
+    base_len.saturating_mul(u64::from(exp)) <= MAX_POWER_RESULT_LEN
 }
 
-/// Exponentiation. Integer exponents stay exact via `BigDecimal::powi`;
-/// negative integers invert the base; fractional or very large integers fall
-/// through to `BigFloat` and round back.
-fn power(
+/// Float-pow fallback for bases/exponents the integer path can't keep exact.
+/// Required when `(1 + 1/1_000_000)^1_000_000 → e` — naive repeated
+/// multiplication would balloon the decimal scale, but `BigFloat` at 192-bit
+/// precision converges fine.
+fn power_via_bigfloat(
     base: &BigDecimal,
     exp: &BigDecimal,
     consts: &mut Consts,
 ) -> Result<BigDecimal, ExpressionError> {
-    if let Some(e) = as_nonneg_u32(exp) {
-        guard_integer_power_size(base, e)?;
-        return Ok(base.powi(i64::from(e)));
-    }
-    if exp.is_integer()
-        && exp.is_negative()
-        && let Some(abs_e) = exp.abs().to_u32()
-    {
-        guard_integer_power_size(base, abs_e)?;
-        let positive = base.powi(i64::from(abs_e));
-        return divide(&BigDecimal::from(1), &positive);
-    }
     let base_bf = bd_to_bf(base, consts);
     let exp_bf = bd_to_bf(exp, consts);
     let out = base_bf.pow(&exp_bf, AF_PRECISION, AfRm::ToEven, consts);
@@ -243,6 +228,32 @@ fn power(
         });
     }
     Ok(bf_to_bd(&out, consts))
+}
+
+/// Exponentiation. Integer exponents whose expanded result fits within
+/// [`MAX_POWER_RESULT_LEN`] stay exact via `BigDecimal::powi`; oversized
+/// integer exponents fall through to `BigFloat` so `(1 + 1/n)^n → e` keeps
+/// converging. Negative integers invert the base when the magnitude fits.
+fn power(
+    base: &BigDecimal,
+    exp: &BigDecimal,
+    consts: &mut Consts,
+) -> Result<BigDecimal, ExpressionError> {
+    if let Some(e) = as_nonneg_u32(exp) {
+        if integer_power_fits(base, e) {
+            return Ok(base.powi(i64::from(e)));
+        }
+        return power_via_bigfloat(base, exp, consts);
+    }
+    if exp.is_integer()
+        && exp.is_negative()
+        && let Some(abs_e) = exp.abs().to_u32()
+        && integer_power_fits(base, abs_e)
+    {
+        let positive = base.powi(i64::from(abs_e));
+        return divide(&BigDecimal::from(1), &positive);
+    }
+    power_via_bigfloat(base, exp, consts)
 }
 
 fn ceil(value: &BigDecimal) -> BigDecimal {
