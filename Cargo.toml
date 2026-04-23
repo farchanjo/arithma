@@ -1,6 +1,6 @@
 [package]
 name = "arithma"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Fabricio Archanjo <fabricio@archanjo.com>"]
@@ -59,6 +59,10 @@ num-integer = "0.1"
 
 # Arbitrary-precision transcendentals with correct rounding (128-bit precision)
 astro-float = "0.9"
+
+# Pure-Rust libm port for f64 special functions not in std (erf, gamma, …).
+# Used where BigDecimal precision would be overkill (statistics, physics).
+libm = "0.2"
 
 # DateTime with IANA timezone support (embedded timezone database)
 jiff = { version = "0.2", features = ["serde"] }
