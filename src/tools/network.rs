@@ -229,14 +229,44 @@ pub fn summarize_subnets(subnets_json: &str) -> String {
 }
 
 /// Expand a compressed IPv6 address to its full 8-group form.
+///
+/// For IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, prefix `::ffff/96` per
+/// RFC 4291 §2.5.5.2) the last 32 bits render in dotted IPv4 notation so
+/// the embedded IPv4 address stays readable — `::ffff:192.168.1.1` expands
+/// to `0000:0000:0000:0000:0000:ffff:192.168.1.1`, not the hexadecimal
+/// `...:c0a8:0101` that obscures the source address. Every other v6
+/// address falls back to the plain 8-group hex form.
 #[must_use]
 pub fn expand_ipv6(address: &str) -> String {
     match parse_ipv6_for(EXPAND_IPV6, address) {
         Ok(v) => Response::ok(EXPAND_IPV6)
-            .result(big_int_to_ipv6_full(&v))
+            .result(expanded_ipv6_display(&v))
             .build(),
         Err(e) => e,
     }
+}
+
+/// Format an IPv6 value as `0000:...:a.b.c.d` when it sits in the
+/// `::ffff/96` IPv4-mapped block, otherwise fall back to the plain hex
+/// form. Keeping the v4 tail dotted matches RFC 4291 §2.5.5.2 and every
+/// mainstream v6 tool (Python's `ipaddress`, `inet_ntop`, curl, dig).
+fn expanded_ipv6_display(value: &BigInt) -> String {
+    let full_hex = big_int_to_ipv6_full(value);
+    if let Some(stripped) = full_hex.strip_prefix("0000:0000:0000:0000:0000:ffff:") {
+        // The last two groups are four hex chars each. Split into four
+        // octets and print the standard dotted-quad IPv4 suffix.
+        let (hi, lo) = stripped.split_once(':').expect("two trailing hex groups");
+        if let (Ok(hi_bytes), Ok(lo_bytes)) =
+            (u32::from_str_radix(hi, 16), u32::from_str_radix(lo, 16))
+        {
+            let a = (hi_bytes >> 8) & 0xff;
+            let b = hi_bytes & 0xff;
+            let c = (lo_bytes >> 8) & 0xff;
+            let d = lo_bytes & 0xff;
+            return format!("0000:0000:0000:0000:0000:ffff:{a}.{b}.{c}.{d}");
+        }
+    }
+    full_hex
 }
 
 /// Compress an IPv6 address to its shortest canonical form using `::`.
@@ -508,10 +538,20 @@ fn subnet_v4(address: &str, cidr: i32) -> String {
     } else {
         (network + 1, broadcast - 1, broadcast - network - 1)
     };
-    Response::ok(SUBNET_CALCULATOR)
-        .field("NETWORK", long_to_ipv4_str(network))
-        .field("BROADCAST", long_to_ipv4_str(broadcast))
-        .field("MASK", long_to_ipv4_str(mask))
+    // /31 (RFC 3021 point-to-point) and /32 (host route) have no broadcast —
+    // emitting one would be semantically wrong. Callers audited the output
+    // and flagged that `BROADCAST: 10.0.0.1` for `10.0.0.0/31` looked like a
+    // genuine broadcast address when it is actually just the peer host.
+    let broadcast_field = if cidr == IPV4_BITS || cidr == CIDR_31 {
+        None
+    } else {
+        Some(long_to_ipv4_str(broadcast))
+    };
+    let mut resp = Response::ok(SUBNET_CALCULATOR).field("NETWORK", long_to_ipv4_str(network));
+    if let Some(b) = broadcast_field {
+        resp = resp.field("BROADCAST", b);
+    }
+    resp.field("MASK", long_to_ipv4_str(mask))
         .field("WILDCARD", long_to_ipv4_str(wildcard))
         .field("FIRST_HOST", long_to_ipv4_str(first_host))
         .field("LAST_HOST", long_to_ipv4_str(last_host))
@@ -1335,9 +1375,12 @@ mod tests {
 
     #[test]
     fn subnet_calc_cidr_31_point_to_point() {
+        // RFC 3021: /31 has no broadcast — both addresses are peer hosts.
+        // Ensure BROADCAST is omitted so callers don't mistake the peer
+        // address for a broadcast destination.
         assert_eq!(
             subnet_calculator("10.0.0.0", 31),
-            "SUBNET_CALCULATOR: OK | NETWORK: 10.0.0.0 | BROADCAST: 10.0.0.1 | MASK: 255.255.255.254 | WILDCARD: 0.0.0.1 | FIRST_HOST: 10.0.0.0 | LAST_HOST: 10.0.0.1 | USABLE_HOSTS: 2 | IP_CLASS: A"
+            "SUBNET_CALCULATOR: OK | NETWORK: 10.0.0.0 | MASK: 255.255.255.254 | WILDCARD: 0.0.0.1 | FIRST_HOST: 10.0.0.0 | LAST_HOST: 10.0.0.1 | USABLE_HOSTS: 2 | IP_CLASS: A"
         );
     }
 
@@ -1345,11 +1388,12 @@ mod tests {
     fn subnet_calc_cidr_32_host_route() {
         // /32 names one address, which is itself usable — mirrors the
         // corrected IPv6 /128 semantic and keeps "0 hosts" off the table
-        // for a single-host declaration.
+        // for a single-host declaration. BROADCAST does not apply.
         let out = subnet_calculator("10.0.0.5", 32);
         assert!(out.contains("USABLE_HOSTS: 1"), "got: {out}");
         assert!(out.contains("FIRST_HOST: 10.0.0.5"));
         assert!(out.contains("LAST_HOST: 10.0.0.5"));
+        assert!(!out.contains("BROADCAST"), "/32 must not emit BROADCAST");
     }
 
     #[test]
@@ -1597,6 +1641,28 @@ mod tests {
         assert_eq!(
             compress_ipv6("2001:0db8:0000:0000:0000:0000:0000:0001"),
             "COMPRESS_IPV6: OK | RESULT: 2001:db8::1"
+        );
+    }
+
+    #[test]
+    fn expand_ipv6_v4_mapped_keeps_dotted_quad() {
+        // RFC 4291 §2.5.5.2: the ::ffff/96 block holds IPv4-mapped v6
+        // addresses. The IPv4 tail must stay readable — printing it as
+        // `c0a8:0101` instead of `192.168.1.1` hides the underlying v4
+        // address from anyone scanning logs/tool output.
+        assert_eq!(
+            expand_ipv6("::ffff:192.168.1.1"),
+            "EXPAND_IPV6: OK | RESULT: 0000:0000:0000:0000:0000:ffff:192.168.1.1"
+        );
+    }
+
+    #[test]
+    fn expand_ipv6_non_v4_mapped_stays_hex() {
+        // A garden-variety v6 address (no ::ffff/96 prefix) must still
+        // render in the standard 8-group hex form.
+        assert_eq!(
+            expand_ipv6("2001:db8::1"),
+            "EXPAND_IPV6: OK | RESULT: 2001:0db8:0000:0000:0000:0000:0000:0001"
         );
     }
 
