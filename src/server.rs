@@ -1122,7 +1122,7 @@ impl MathCalcServer {
     // ---- Programmable --------------------------------------------------- //
 
     #[tool(
-        description = "Evaluate an arithmetic expression. Supports + - * / ^ %, parens, and functions sin/cos/tan/log/log10/sqrt/abs/ceil/floor."
+        description = "Evaluate an f64 arithmetic expression. Supports + - * / ^ % and sin/cos/tan (degrees), sin_r/cos_r/tan_r (radians), log/log10/sqrt/abs/ceil/floor. factorial capped at 20. Trig is f64-precision so sin(30)*2 ≈ 0.9999... — use evaluateExact or the `sin` tool for notable-angle exactness."
     )]
     fn evaluate(Parameters(p): Parameters<EvaluateParams>) -> String {
         programmable::evaluate(&p.expression)
@@ -1130,7 +1130,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "evaluateWithVariables",
-        description = "Evaluate an arithmetic expression with a JSON variable map, e.g. expression='2*x+y', variables='{\"x\":3,\"y\":1}'."
+        description = "Evaluate an f64 arithmetic expression with a JSON variable map, e.g. expression='2*x+y', variables='{\"x\":3,\"y\":1}'. Variable names pi/e/tau/phi are reserved for engine constants and must not be bound."
     )]
     fn evaluate_with_variables(Parameters(p): Parameters<EvaluateWithVariablesParams>) -> String {
         programmable::evaluate_with_variables(&p.expression, &p.variables)
@@ -1138,7 +1138,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "evaluateExact",
-        description = "Evaluate an arithmetic expression at 128-bit precision (astro-float). Returns exact decimals (0.1+0.2 = 0.3)."
+        description = "Evaluate an arithmetic expression at 128-bit precision (astro-float). Returns exact decimals (0.1+0.2 = 0.3). Trig functions sin/cos/tan still take degrees — use sin_r/cos_r/tan_r for radians (sin_r(pi) = 0)."
     )]
     fn evaluate_exact(Parameters(p): Parameters<EvaluateParams>) -> String {
         programmable::evaluate_exact(&p.expression)
@@ -1249,7 +1249,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "nthDerivative",
-        description = "Nth-order numerical derivative of an expression at a point. Order must be in [1, 10]."
+        description = "Nth-order numerical derivative of an expression at a point. Order must be in [1, 10]. High orders amplify the f64 truncation error: d^10/dx^10 x^10 at x=1 returns 3628800.000000006 instead of the exact 10! = 3628800."
     )]
     fn nth_derivative(Parameters(p): Parameters<NthDerivativeParams>) -> String {
         calculus::nth_derivative(&p.expression, &p.variable, p.point, p.order)

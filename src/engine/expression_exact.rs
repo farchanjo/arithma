@@ -302,6 +302,30 @@ fn tan_bd(degrees: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, Expre
     Ok(bf_to_bd(&out, consts))
 }
 
+// Radian-input variants. `sin(pi)` interprets pi in degrees (~0.0548);
+// `sin_r(pi)` returns 0 as callers expect when combining trig with the pi
+// constant.
+fn sin_rad_bd(radians: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
+    let bf = bd_to_bf(radians, consts);
+    let out = bf.sin(AF_PRECISION, AfRm::ToEven, consts);
+    finite_or_domain(&out, "sin_r", radians)?;
+    Ok(bf_to_bd(&out, consts))
+}
+
+fn cos_rad_bd(radians: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
+    let bf = bd_to_bf(radians, consts);
+    let out = bf.cos(AF_PRECISION, AfRm::ToEven, consts);
+    finite_or_domain(&out, "cos_r", radians)?;
+    Ok(bf_to_bd(&out, consts))
+}
+
+fn tan_rad_bd(radians: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
+    let bf = bd_to_bf(radians, consts);
+    let out = bf.tan(AF_PRECISION, AfRm::ToEven, consts);
+    finite_or_domain(&out, "tan_r", radians)?;
+    Ok(bf_to_bd(&out, consts))
+}
+
 fn exp_bd(value: &BigDecimal, consts: &mut Consts) -> Result<BigDecimal, ExpressionError> {
     let bf = bd_to_bf(value, consts);
     let out = bf.exp(AF_PRECISION, AfRm::ToEven, consts);
@@ -785,9 +809,8 @@ impl<'a, 'c, S: BuildHasher> Parser<'a, 'c, S> {
         args: &[BigDecimal],
     ) -> Result<BigDecimal, ExpressionError> {
         match name {
-            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" => {
-                self.dispatch_trig(name, args)
-            }
+            "sin" | "cos" | "tan" | "sin_r" | "cos_r" | "tan_r" | "asin" | "acos" | "atan"
+            | "atan2" => self.dispatch_trig(name, args),
             "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => {
                 self.dispatch_hyperbolic(name, args)
             }
@@ -821,6 +844,18 @@ impl<'a, 'c, S: BuildHasher> Parser<'a, 'c, S> {
             "tan" => {
                 check_arity_bd(args, 1, "tan")?;
                 tan_bd(&args[0], self.consts)
+            }
+            "sin_r" => {
+                check_arity_bd(args, 1, "sin_r")?;
+                sin_rad_bd(&args[0], self.consts)
+            }
+            "cos_r" => {
+                check_arity_bd(args, 1, "cos_r")?;
+                cos_rad_bd(&args[0], self.consts)
+            }
+            "tan_r" => {
+                check_arity_bd(args, 1, "tan_r")?;
+                tan_rad_bd(&args[0], self.consts)
             }
             "asin" => {
                 check_arity_bd(args, 1, "asin")?;

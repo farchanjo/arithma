@@ -420,6 +420,33 @@ fn domain_err(op: &str, value: f64) -> ExpressionError {
     }
 }
 
+fn call_trig_radians(name: &str, args: &[f64]) -> Result<f64, ExpressionError> {
+    // Radian-input variants (suffix `_r`). Exist so callers who combine trig
+    // with the `pi`/`tau` constants get the expected mathematical behaviour,
+    // e.g. `sin_r(pi) = 0` — the default `sin` interprets its argument in
+    // degrees and would otherwise return ~0.0548.
+    match name {
+        "sin_r" => {
+            check_arity(args, 1, "sin_r")?;
+            Ok(args[0].sin())
+        }
+        "cos_r" => {
+            check_arity(args, 1, "cos_r")?;
+            Ok(args[0].cos())
+        }
+        "tan_r" => {
+            check_arity(args, 1, "tan_r")?;
+            let value = args[0].tan();
+            if value.is_finite() {
+                Ok(value)
+            } else {
+                Err(domain_err("tan_r", args[0]))
+            }
+        }
+        _ => Err(ExpressionError::UnknownFunction(name.to_string())),
+    }
+}
+
 fn call_trig(name: &str, args: &[f64]) -> Result<f64, ExpressionError> {
     match name {
         "sin" => {
@@ -439,6 +466,7 @@ fn call_trig(name: &str, args: &[f64]) -> Result<f64, ExpressionError> {
                 Err(domain_err("tan", args[0]))
             }
         }
+        "sin_r" | "cos_r" | "tan_r" => call_trig_radians(name, args),
         "asin" => {
             check_arity(args, 1, "asin")?;
             if (-1.0..=1.0).contains(&args[0]) {
@@ -640,7 +668,8 @@ fn call_multi_arg(name: &str, args: &[f64]) -> Result<f64, ExpressionError> {
 
 fn call_function(name: &str, args: &[f64]) -> Result<f64, ExpressionError> {
     match name {
-        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" => call_trig(name, args),
+        "sin" | "cos" | "tan" | "sin_r" | "cos_r" | "tan_r" | "asin" | "acos" | "atan"
+        | "atan2" => call_trig(name, args),
         "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => call_hyperbolic(name, args),
         "exp" | "log" | "ln" | "log10" | "log2" => call_exp_log(name, args),
         "sqrt" | "cbrt" | "abs" | "ceil" | "floor" | "round" | "trunc" | "sign" => {
@@ -662,7 +691,11 @@ fn guard_finite(value: f64, op: &str) -> Result<f64, ExpressionError> {
 }
 
 fn factorial_f64(value: f64) -> Result<f64, ExpressionError> {
-    if value.fract() != 0.0 || !(0.0..=170.0).contains(&value) {
+    // Keep the factorial limit aligned with the dedicated `factorial` MCP
+    // tool (0..=20) so `evaluate("factorial(n)")` and `factorial(n)` agree
+    // on what values are "valid". Beyond 20 f64 silently loses precision
+    // anyway, so exposing the 170-wide window was misleading.
+    if value.fract() != 0.0 || !(0.0..=20.0).contains(&value) {
         return Err(ExpressionError::DomainError {
             op: "factorial".into(),
             value: format_arg(value),
@@ -1466,6 +1499,28 @@ mod tests {
         // tests that constants compose cleanly with operator math.
         let out = evaluate("sin(pi * 180 / pi)").unwrap();
         assert_close(out, 0.0);
+    }
+
+    #[test]
+    fn sin_r_pi_is_zero() {
+        // Radian variant: sin_r(pi) = 0 exactly (within FP noise). This exists
+        // so callers combining trig with `pi`/`tau` get the expected result
+        // without manually rescaling by 180/pi.
+        let out = evaluate("sin_r(pi)").unwrap();
+        assert_close(out, 0.0);
+    }
+
+    #[test]
+    fn cos_r_pi_is_minus_one() {
+        let out = evaluate("cos_r(pi)").unwrap();
+        assert_close(out, -1.0);
+    }
+
+    #[test]
+    fn tan_r_at_quarter_pi_is_one() {
+        // Spot-check the radian variant: tan_r(π/4) = 1.
+        let out = evaluate("tan_r(pi/4)").unwrap();
+        assert_close(out, 1.0);
     }
 
     #[test]
