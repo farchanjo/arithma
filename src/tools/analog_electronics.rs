@@ -116,10 +116,57 @@ fn af_pow10(exponent: &BigDecimal) -> BigDecimal {
     bf_to_bd(&out)
 }
 
+/// Ratio `|y| / |x|` beyond which the `y/x` quotient used inside
+/// `af_atan2_degrees` loses precision catastrophically: astro-float's atan
+/// implementation drifts toward `3π/2` instead of the expected `±π/2` once
+/// the quotient exceeds its internal exponent window. Well before then
+/// (`|y|/|x| ≥ 10^40`) the atan has converged to machine-precision `±π/2`
+/// anyway, so we short-circuit and skip the quotient entirely. This bound
+/// is orders of magnitude above any physically realistic impedance
+/// measurement yet stays clear of the library's bad zone.
+const ATAN2_DEGENERATE_RATIO_DIGITS: u32 = 40;
+
+/// True when `|y|` overwhelms `|x|` by more than `10^ATAN2_DEGENERATE_RATIO_DIGITS`.
+/// In that regime `atan(y/x) ≈ ±π/2` to full precision, and we can bypass
+/// the astro-float `y/x` + `atan` chain that would otherwise mis-round.
+fn atan2_is_degenerate(y: &BigDecimal, x: &BigDecimal) -> bool {
+    if x.is_zero() {
+        return true;
+    }
+    let threshold = BigDecimal::from(10u64)
+        .with_scale(0)
+        .pow(ATAN2_DEGENERATE_RATIO_DIGITS);
+    y.abs() > x.abs() * threshold
+}
+
+trait BigDecPow {
+    fn pow(&self, exp: u32) -> BigDecimal;
+}
+
+impl BigDecPow for BigDecimal {
+    fn pow(&self, exp: u32) -> Self {
+        let mut result = Self::from(1);
+        for _ in 0..exp {
+            result *= self;
+        }
+        result
+    }
+}
+
 /// atan2 via atan + quadrant adjust, result in degrees.
 fn af_atan2_degrees(y: &BigDecimal, x: &BigDecimal) -> BigDecimal {
     const PI_LITERAL: &str =
         "3.14159265358979323846264338327950288419716939937510582097494459230781640628620";
+    // Pre-check: treat x as effectively zero when |y| ≫ |x|. Without this
+    // guard, astro-float's `y/x` becomes a magnitude it cannot represent and
+    // the subsequent `atan` mis-rounds (regression: `impedance(1e-200,
+    // 1e-200, 1e-200, 1e200)` reported phase 270° instead of 90°).
+    if atan2_is_degenerate(y, x) {
+        let sign_y: i32 = if y.is_negative() { -1 } else { 1 };
+        let ninety =
+            BigDecimal::from_str("90").expect("valid 90 literal") * BigDecimal::from(sign_y);
+        return ninety;
+    }
     let y_bf = bd_to_bf(y);
     let x_bf = bd_to_bf(x);
     let radians = AF_CONSTS.with(|cc| {
@@ -798,10 +845,18 @@ fn compute_decibel(val: &BigDecimal, mode: &str) -> Result<BigDecimal, String> {
             Ok(mul_ctx(&twenty, &af_log10(val)))
         }
         "dbToPower" => {
+            // `10^(value/10)` for `value ≥ ~1e5 dB` yields numbers astro-float
+            // cannot represent inside its ~62-bit exponent window — the
+            // `BigFloat::format` call then panics with "format failed" and
+            // the stdio transport drops the connection. Bound the input
+            // well below that ceiling; realistic decibel ranges top out
+            // around ±200 dB anyway.
+            reject_huge_db(val)?;
             let exponent = div_scaled(val, &ten);
             Ok(af_pow10(&exponent))
         }
         "dbToVoltage" => {
+            reject_huge_db(val)?;
             let exponent = div_scaled(val, &twenty);
             Ok(af_pow10(&exponent))
         }
@@ -812,6 +867,25 @@ fn compute_decibel(val: &BigDecimal, mode: &str) -> Result<BigDecimal, String> {
             &format!("mode={mode}"),
         )),
     }
+}
+
+/// Upper bound on the absolute value of a decibel input before
+/// `af_pow10(value/10)` trips astro-float's internal format/exponent limits
+/// and panics. `10^10000` already overflows any practical numeric type, so
+/// this ceiling is well above anything a caller can legitimately need.
+const DB_MAX_ABS: i64 = 100_000;
+
+fn reject_huge_db(val: &BigDecimal) -> Result<(), String> {
+    let limit = BigDecimal::from(DB_MAX_ABS);
+    if val.abs() > limit {
+        return Err(error_with_detail(
+            DECIBEL_CONVERT,
+            ErrorCode::OutOfRange,
+            "decibel magnitude exceeds the supported range",
+            &format!("value={}, max_abs={}", strip_plain(val), DB_MAX_ABS,),
+        ));
+    }
+    Ok(())
 }
 
 // --- Filter cutoff ---
