@@ -217,18 +217,30 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
     }
 
     // ---- term = power (('*' | '/' | '%') power)* ---- //
+    // NOTE: the grammar is now
+    //
+    //   expression = term (('+' | '-') term)*
+    //   term       = unary (('*' | '/' | '%') unary)*
+    //   unary      = '-' unary | power
+    //   power      = primary ('^' unary)?   (right-associative)
+    //   primary    = NUMBER | VARIABLE | FUNCTION | '(' expression ')'
+    //
+    // Previously `^` lived above unary, so `-2^2` parsed as `(-2)^2 = 4`,
+    // which is inconsistent with the engine's own `0-2^2 = -4` and with
+    // Python / NumPy / Matlab / Excel. Rewiring `term → unary → power →
+    // primary` gives unary minus the lowest precedence, so `-2^2 = -(2^2)`.
     fn parse_term(&mut self) -> Result<f64, ExpressionError> {
-        let mut result = self.parse_power()?;
+        let mut result = self.parse_unary()?;
         loop {
             self.skip_whitespace();
             match self.current_char() {
                 Some('*') => {
                     self.pos += 1;
-                    result = Self::check_finite(result * self.parse_power()?, "*")?;
+                    result = Self::check_finite(result * self.parse_unary()?, "*")?;
                 }
                 Some('/') => {
                     self.pos += 1;
-                    let rhs = self.parse_power()?;
+                    let rhs = self.parse_unary()?;
                     if rhs == 0.0 {
                         return Err(ExpressionError::DivisionByZero);
                     }
@@ -236,7 +248,7 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
                 }
                 Some('%') => {
                     self.pos += 1;
-                    let rhs = self.parse_power()?;
+                    let rhs = self.parse_unary()?;
                     if rhs == 0.0 {
                         return Err(ExpressionError::DivisionByZero);
                     }
@@ -248,13 +260,17 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
         Ok(result)
     }
 
-    // ---- power = unary ('^' power)?  (right-associative) ---- //
+    // ---- power = primary ('^' unary)?  (right-associative) ---- //
+    //
+    // `primary` as the base keeps unary minus below `^` (so `-2^2 = -(2^2)`).
+    // `unary` as the exponent means `2^-3` still parses — the minus binds
+    // inside the exponent, which is the natural reading.
     fn parse_power(&mut self) -> Result<f64, ExpressionError> {
-        let base = self.parse_unary()?;
+        let base = self.parse_primary()?;
         self.skip_whitespace();
         if self.current_char() == Some('^') {
             self.pos += 1;
-            let exponent = self.parse_power()?;
+            let exponent = self.parse_unary()?;
             // 0^(-n) is 1/0 — classify as division by zero rather than the
             // generic overflow that would otherwise come out of powf → +inf.
             if base == 0.0 && exponent < 0.0 {
@@ -282,7 +298,7 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
             let value = self.parse_unary()?;
             Ok(-value)
         } else {
-            self.parse_primary()
+            self.parse_power()
         }
     }
 
@@ -887,13 +903,16 @@ mod tests {
 
     #[test]
     fn power_binds_tighter_than_unary_minus() {
-        // Per Java grammar: unary applies to full power, so -2^2 parses as -(2^2) = -4
-        // Wait — actually: unary = '-' unary | primary, so -2^2 is -(unary) where
-        // unary = primary = 2, then ^ is NOT consumed (power wraps unary). Tracing:
-        //   parse_power -> parse_unary -> '-' then parse_unary -> primary = 2 -> returns 2
-        //   back in outer parse_power: base = -2, sees '^', exponent = parse_power -> 2
-        //   => (-2)^2 = 4
-        assert_close(evaluate("-2^2").unwrap(), 4.0);
+        // Mathematical convention (shared with Python, NumPy, Excel, Matlab):
+        // `-2^2` parses as `-(2^2) = -4`, because unary minus has lower
+        // precedence than `^`. Anything else would contradict the engine's
+        // own `0 - 2^2 = -4`.
+        assert_close(evaluate("-2^2").unwrap(), -4.0);
+        assert_close(evaluate("-2^3").unwrap(), -8.0);
+        // Parentheses still let the caller request `(-2)^2` explicitly.
+        assert_close(evaluate("(-2)^2").unwrap(), 4.0);
+        // The exponent slot still accepts a unary minus — `2^-3 = 1/8`.
+        assert_close(evaluate("2^-3").unwrap(), 0.125);
     }
 
     // ---- unary minus ----

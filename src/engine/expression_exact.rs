@@ -664,23 +664,26 @@ impl<'a, 'c, S: BuildHasher> Parser<'a, 'c, S> {
         Ok(result)
     }
 
+    // Grammar (mirrors the f64 evaluator — see `expression.rs` for the
+    // rationale): term → unary → power → primary, so unary minus stays below
+    // `^` and `-2^2` evaluates as `-(2^2) = -4`.
     fn parse_term(&mut self) -> Result<BigDecimal, ExpressionError> {
-        let mut result = self.parse_power()?;
+        let mut result = self.parse_unary()?;
         loop {
             self.skip_whitespace();
             match self.current_char() {
                 Some('*') => {
                     self.pos += 1;
-                    result = &result * &self.parse_power()?;
+                    result = &result * &self.parse_unary()?;
                 }
                 Some('/') => {
                     self.pos += 1;
-                    let rhs = self.parse_power()?;
+                    let rhs = self.parse_unary()?;
                     result = divide(&result, &rhs)?;
                 }
                 Some('%') => {
                     self.pos += 1;
-                    let rhs = self.parse_power()?;
+                    let rhs = self.parse_unary()?;
                     result = modulo(&result, &rhs)?;
                 }
                 _ => break,
@@ -690,11 +693,11 @@ impl<'a, 'c, S: BuildHasher> Parser<'a, 'c, S> {
     }
 
     fn parse_power(&mut self) -> Result<BigDecimal, ExpressionError> {
-        let base = self.parse_unary()?;
+        let base = self.parse_primary()?;
         self.skip_whitespace();
         if self.current_char() == Some('^') {
             self.pos += 1;
-            let exponent = self.parse_power()?;
+            let exponent = self.parse_unary()?;
             return power(&base, &exponent, self.consts);
         }
         Ok(base)
@@ -707,7 +710,7 @@ impl<'a, 'c, S: BuildHasher> Parser<'a, 'c, S> {
             let value = self.parse_unary()?;
             return Ok(-value);
         }
-        self.parse_primary()
+        self.parse_power()
     }
 
     fn parse_primary(&mut self) -> Result<BigDecimal, ExpressionError> {
@@ -1105,7 +1108,11 @@ mod tests {
 
     #[test]
     fn unary_minus() {
-        assert_eq!(evaluate("-2^2").unwrap(), "4"); // (-2)^2 = 4 per shared grammar
+        // Unary minus has lower precedence than `^`; `-2^2` is `-(2^2) = -4`,
+        // matching Python / NumPy / Excel and the engine's own `0 - 2^2 = -4`.
+        assert_eq!(evaluate("-2^2").unwrap(), "-4");
+        assert_eq!(evaluate("(-2)^2").unwrap(), "4");
+        assert_eq!(evaluate("2^-3").unwrap(), "0.125");
         assert_eq!(evaluate("--5").unwrap(), "5");
     }
 
