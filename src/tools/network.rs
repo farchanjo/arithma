@@ -513,17 +513,11 @@ fn subnet_v6(address: &str, cidr: i32) -> String {
         (BigInt::one() << host_bits) - BigInt::one()
     };
     let last = &network | &host_range;
-    let (first_host, last_host, usable_hosts) = if host_bits == 0 {
-        (network.clone(), network.clone(), BigInt::zero())
-    } else if host_bits == 1 {
-        (network.clone(), last, BigInt::from(2u32))
-    } else {
-        (
-            &network + BigInt::one(),
-            &last - BigInt::one(),
-            &host_range - BigInt::one(),
-        )
-    };
+    // IPv6 has no broadcast and reserves no network identifier — every address
+    // in the block is a valid host, so the usable count is the full 2^host_bits
+    // and the range starts at the network address itself.
+    let usable_hosts = BigInt::one() << host_bits;
+    let (first_host, last_host) = (network.clone(), last);
     Response::ok(SUBNET_CALCULATOR)
         .field("NETWORK", big_int_to_ipv6_full(&network))
         .field("MASK", big_int_to_ipv6_full(&mask))
@@ -1143,7 +1137,9 @@ fn compute_throughput(
 fn compute_tcp_throughput(bandwidth_mbps: &str, rtt_ms: &str, window_size_kb: &str) -> String {
     let million = BigDecimal::from(1_000_000);
     let thousand = BigDecimal::from(1_000);
-    let kilo_bits = BigDecimal::from(8192);
+    // SI-aligned: 1 kB = 1000 bytes = 8000 bits. Matches the DATA_STORAGE
+    // registry and the SI Mbps/ms bandwidth units already used here.
+    let kilo_bits = BigDecimal::from(8000);
 
     let bw = match parse_decimal_for(TCP_THROUGHPUT, bandwidth_mbps, "bandwidthMbps") {
         Ok(v) => v,
@@ -1302,9 +1298,22 @@ mod tests {
 
     #[test]
     fn subnet_calc_ipv6() {
+        // IPv6 has no broadcast, so FIRST_HOST = network, LAST_HOST = last,
+        // USABLE = 2^host_bits (here 2^64).
         assert_eq!(
             subnet_calculator("2001:db8::", 64),
-            "SUBNET_CALCULATOR: OK | NETWORK: 2001:0db8:0000:0000:0000:0000:0000:0000 | MASK: ffff:ffff:ffff:ffff:0000:0000:0000:0000 | FIRST_HOST: 2001:0db8:0000:0000:0000:0000:0000:0001 | LAST_HOST: 2001:0db8:0000:0000:ffff:ffff:ffff:fffe | USABLE_HOSTS: 18446744073709551614"
+            "SUBNET_CALCULATOR: OK | NETWORK: 2001:0db8:0000:0000:0000:0000:0000:0000 | MASK: ffff:ffff:ffff:ffff:0000:0000:0000:0000 | FIRST_HOST: 2001:0db8:0000:0000:0000:0000:0000:0000 | LAST_HOST: 2001:0db8:0000:0000:ffff:ffff:ffff:ffff | USABLE_HOSTS: 18446744073709551616"
+        );
+    }
+
+    #[test]
+    fn subnet_calc_ipv6_slash_128_single_host() {
+        // /128 names one address — that address is itself a valid host.
+        let out = subnet_calculator("2001:db8::1", 128);
+        assert!(out.contains("USABLE_HOSTS: 1"), "got: {out}");
+        assert!(
+            out.contains("FIRST_HOST: 2001:0db8:0000:0000:0000:0000:0000:0001"),
+            "got: {out}"
         );
     }
 
@@ -1477,25 +1486,28 @@ mod tests {
 
     #[test]
     fn transfer_time_1gb_at_100mbps() {
+        // SI decimal: 1 GB = 8e9 bits → 80 s at 100 Mbps.
         assert_eq!(
             transfer_time("1", "gb", "100", "mbps"),
-            "TRANSFER_TIME: OK | SECONDS: 85.89934592 | MINUTES: 1.43165576533333333333 | HOURS: 0.02386092942222222222"
+            "TRANSFER_TIME: OK | SECONDS: 80 | MINUTES: 1.33333333333333333333 | HOURS: 0.02222222222222222222"
         );
     }
 
     #[test]
     fn throughput_100mb_10s_to_mbps() {
+        // SI decimal: 100 MB = 8e8 bits / 10 s = 80 Mbps.
         assert_eq!(
             throughput("100", "mb", "10", "s", "mbps"),
-            "THROUGHPUT: OK | RATE: 83.88608"
+            "THROUGHPUT: OK | RATE: 80"
         );
     }
 
     #[test]
     fn tcp_throughput_window_limited() {
+        // SI decimal: 64 kB = 512 000 bits / 100 ms = 5.12 Mbps.
         assert_eq!(
             tcp_throughput("1000", "100", "64"),
-            "TCP_THROUGHPUT: OK | RATE_MBPS: 5.24288"
+            "TCP_THROUGHPUT: OK | RATE_MBPS: 5.12"
         );
     }
 
