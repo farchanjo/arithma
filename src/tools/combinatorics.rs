@@ -212,11 +212,11 @@ pub fn next_prime(n: i64) -> String {
 /// list. Caps `n` at 10^12 to keep response time bounded.
 #[must_use]
 pub fn prime_factors(n: i64) -> String {
-    if n < 2 {
+    if n < 1 {
         return error_with_detail(
             TOOL_PRIME_FACTORS,
             ErrorCode::OutOfRange,
-            "n must be at least 2",
+            "n must be at least 1",
             &format!("n={n}"),
         );
     }
@@ -229,6 +229,10 @@ pub fn prime_factors(n: i64) -> String {
             &format!("n={n}, max=1000000000000"),
         );
     }
+    // The prime factorization of 1 is the empty product — no primes multiply
+    // to give 1. Keep the COUNT=0 / FACTORS= response so callers can branch
+    // on presence without special-casing this input (aligns with eulerTotient
+    // accepting n=1 and returning 1).
     let mut factors: Vec<u64> = Vec::new();
     let mut divisor: u64 = 2;
     while divisor.saturating_mul(divisor) <= value {
@@ -426,8 +430,18 @@ mod tests {
     }
 
     #[test]
-    fn prime_factors_one_errors() {
+    fn prime_factors_one_is_empty_product() {
+        // The prime factorization of 1 is the empty product — no primes
+        // multiply to give 1. This matches the convention in eulerTotient(1).
         let out = prime_factors(1);
+        assert!(out.contains("PRIME_FACTORS: OK"));
+        assert!(out.contains("FACTORS: "));
+        assert!(out.contains("COUNT: 0"));
+    }
+
+    #[test]
+    fn prime_factors_zero_errors() {
+        let out = prime_factors(0);
         assert!(out.starts_with("PRIME_FACTORS: ERROR"));
     }
 
