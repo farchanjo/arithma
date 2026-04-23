@@ -96,14 +96,15 @@ pub fn projectile_motion(speed: &str, angle_degrees: &str, gravity: &str) -> Str
             &format!("speed={v}, gravity={g}"),
         );
     }
-    if !(0.0..=90.0).contains(&theta) {
-        // Ballistic projectile is parameterised by a launch angle above the
-        // horizontal; angles outside [0°, 90°] produce negative time of
-        // flight or mirror symmetric cases. Reject to avoid silent nonsense.
+    if !(0.0..=180.0).contains(&theta) {
+        // Angles in [0°, 180°] span every physically sensible launch above
+        // the horizon (0 = horizontal forward, 90 = straight up, 180 =
+        // horizontal backward). Negative or > 180° angles imply a downward
+        // launch, which yields a negative time-of-flight — reject instead.
         return error_with_detail(
             TOOL_PROJECTILE_MOTION,
             ErrorCode::DomainError,
-            "angle must be in [0, 90] degrees",
+            "angle must be in [0, 180] degrees",
             &format!("angleDegrees={theta}"),
         );
     }
@@ -779,13 +780,27 @@ mod tests {
     fn projectile_rejects_negative_angle() {
         let out = projectile_motion("10", "-45", "9.81");
         assert!(out.starts_with("PROJECTILE_MOTION: ERROR"));
-        assert!(out.contains("angle must be in [0, 90]"));
+        assert!(out.contains("angle must be in [0, 180]"));
     }
 
     #[test]
-    fn projectile_rejects_angle_above_90() {
-        let out = projectile_motion("10", "120", "9.81");
+    fn projectile_rejects_angle_above_180() {
+        let out = projectile_motion("10", "200", "9.81");
         assert!(out.starts_with("PROJECTILE_MOTION: ERROR"));
+    }
+
+    #[test]
+    fn projectile_backward_launch_signed_range() {
+        // 135° is the mirror of 45°: same peak/time, range flipped to negative.
+        let back = projectile_motion("10", "135", "9.81");
+        let fwd = projectile_motion("10", "45", "9.81");
+        assert!(back.starts_with("PROJECTILE_MOTION: OK"));
+        // RANGE at 135° ≈ -1 · RANGE at 45° (same magnitude, opposite sign).
+        assert!(
+            back.contains("RANGE: -"),
+            "expected backward range, got {back}"
+        );
+        assert!(fwd.contains("RANGE: ") && !fwd.contains("RANGE: -"));
     }
 
     #[test]
