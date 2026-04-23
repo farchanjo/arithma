@@ -20,7 +20,10 @@ use crate::tools::{
 
 #[derive(Clone)]
 pub struct MathCalcServer {
-    #[allow(dead_code)] // consumed by #[tool_handler]
+    // Accessed both by the `#[tool_handler]` macro (dispatch) and
+    // `get_info()` (reports live tool count). The lint is therefore a
+    // false positive; the explicit read in `get_info` silences it without
+    // requiring `#[allow(dead_code)]`.
     tool_router: ToolRouter<Self>,
 }
 
@@ -49,7 +52,8 @@ pub struct BinaryDecimalParams {
 pub struct PowerParams {
     /// Base value (decimal string, arbitrary precision).
     pub base: String,
-    /// Non-negative integer exponent.
+    /// Exponent. Integer ≥ 0 uses exact `BigDecimal`; fractional or negative
+    /// values fall back to the 128-bit exact evaluator (`2 ^ 0.5`, `2 ^ -3`).
     pub exponent: String,
 }
 
@@ -75,7 +79,7 @@ pub struct AngleParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct FactorialParams {
-    /// Integer in the closed range [0, 20].
+    /// Integer in the closed range [0, 1000] — arbitrary-precision output.
     pub num: i64,
 }
 
@@ -1063,7 +1067,9 @@ impl MathCalcServer {
         basic::divide(&p.first, &p.second)
     }
 
-    #[tool(description = "Raise base to a non-negative integer exponent. Exact result.")]
+    #[tool(
+        description = "Raise base to an exponent. Non-negative integer exponents use exact BigDecimal arithmetic; fractional or negative exponents transparently delegate to the 128-bit exact evaluator (so `2 ^ 0.5` and `2 ^ -3` both work)."
+    )]
     fn power(Parameters(p): Parameters<PowerParams>) -> String {
         basic::power(&p.base, &p.exponent)
     }
@@ -1095,7 +1101,9 @@ impl MathCalcServer {
         scientific::log10(p.number)
     }
 
-    #[tool(description = "Factorial (n!) for integers in the range 0..=20.")]
+    #[tool(
+        description = "Factorial (n!) for integers in the range 0..=1000. Returns an arbitrary-precision integer — 1000! has 2568 digits."
+    )]
     fn factorial(Parameters(p): Parameters<FactorialParams>) -> String {
         scientific::factorial(p.num)
     }
@@ -1122,7 +1130,7 @@ impl MathCalcServer {
     // ---- Programmable --------------------------------------------------- //
 
     #[tool(
-        description = "Evaluate an f64 arithmetic expression. Supports + - * / ^ % and sin/cos/tan (degrees), sin_r/cos_r/tan_r (radians), log/log10/sqrt/abs/ceil/floor. factorial capped at 20. Trig is f64-precision so sin(30)*2 ≈ 0.9999... — use evaluateExact or the `sin` tool for notable-angle exactness."
+        description = "Evaluate an f64 arithmetic expression. Supports + - * / ^ % and sin/cos/tan (degrees), sin_r/cos_r/tan_r (radians), log/log10/sqrt/abs/ceil/floor. Factorial is spelled `factorial(n)` (not `n!`) and is capped at n <= 20 in this evaluator. Trig is f64-precision so sin(30)*2 ≈ 0.9999... — use evaluateExact or the `sin` tool for notable-angle exactness."
     )]
     fn evaluate(Parameters(p): Parameters<EvaluateParams>) -> String {
         programmable::evaluate(&p.expression)
@@ -1257,7 +1265,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "definiteIntegral",
-        description = "Definite integral ∫[lower..upper] f(var) dvar via composite Simpson's rule (10 000 intervals)."
+        description = "Definite integral ∫[lower..upper] f(var) dvar via composite Simpson's rule (10 000 intervals). Trig functions inside the integrand (sin/cos/tan) take DEGREES by default — use sin_r/cos_r/tan_r if you want radians (e.g. ∫₀^π sin_r(x) dx = 2)."
     )]
     fn definite_integral(Parameters(p): Parameters<DefiniteIntegralParams>) -> String {
         calculus::definite_integral(&p.expression, &p.variable, p.lower, p.upper)
@@ -1318,10 +1326,18 @@ impl MathCalcServer {
 
     #[tool(
         name = "listCategories",
-        description = "List every registered measurement category as a JSON array."
+        description = "List every registered MEASUREMENT UNIT category (e.g. LENGTH, MASS, TEMPERATURE). These are the 21 categories consumed by `convert`, `listUnits`, and friends. Distinct from the 23 TOOL MODULE categories surfaced in the server instructions (Basic, Scientific, ...) — use `listToolCategories` for those."
     )]
     fn list_categories() -> String {
         measure_reference::list_categories()
+    }
+
+    #[tool(
+        name = "listToolCategories",
+        description = "List the 23 tool-module categories that organize arithma's tools (Basic, Scientific, Programmable, Vector/SIMD, Financial, ...). Distinct from `listCategories`, which returns the 21 measurement-unit categories consumed by the unit-converter tools."
+    )]
+    fn list_tool_categories() -> String {
+        measure_reference::list_tool_categories()
     }
 
     #[tool(
@@ -1430,7 +1446,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "subnetCalculator",
-        description = "Subnet details (network, broadcast, mask, wildcard, first/last host, usable hosts, IP class) for IPv4 or IPv6."
+        description = "Subnet details (network, broadcast, mask, wildcard, first/last host, usable hosts, IP class) for IPv4 or IPv6. /31 returns 2 usable hosts per RFC 3021 (point-to-point links); /32 returns 1 (host route)."
     )]
     fn subnet_calculator(Parameters(p): Parameters<SubnetParams>) -> String {
         network::subnet_calculator(&p.address, p.cidr)
@@ -1536,7 +1552,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "tcpThroughput",
-        description = "Effective TCP throughput via bandwidth-delay product. Returns Mbps."
+        description = "Effective TCP throughput via bandwidth-delay product. Returns Mbps. Uses SI units: 1 kB = 1000 bytes (not 1024); 1 Mbps = 10^6 bps. Matches the DATA_STORAGE/DATA_RATE unit registry."
     )]
     fn tcp_throughput(Parameters(p): Parameters<TcpThroughputParams>) -> String {
         network::tcp_throughput(&p.bandwidth_mbps, &p.rtt_ms, &p.window_size_kb)
@@ -1683,7 +1699,7 @@ impl MathCalcServer {
 
     #[tool(
         name = "bitwiseOp",
-        description = "Bitwise op: AND, OR, XOR, NOT, SHL, SHR. Returns JSON {decimal, binary}."
+        description = "Bitwise op: AND, OR, XOR, NOT, SHL, SHR. Operates on arbitrary-precision signed integers (two's-complement with unbounded width): NOT n = -(n+1), so NOT 5 = -6; shift counts are u32, and results are not truncated to any fixed bit-width. For fixed-width two's-complement work use `twosComplement`."
     )]
     fn bitwise_op(Parameters(p): Parameters<BitwiseParams>) -> String {
         digital_electronics::bitwise_op(&p.a, &p.b, &p.operation)
@@ -2428,7 +2444,7 @@ impl ServerHandler for MathCalcServer {
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
             .with_instructions(format!(
-                "Pure-Rust math calculator MCP server. {tool_count} tools across 24 categories. \
+                "Pure-Rust math calculator MCP server. {tool_count} tools across 23 categories. \
                  Response format: `TOOL_NAME: OK | KEY: value | ...` (inline) or block layout with `ROW_N` keys for tabular payloads. \
                  Errors: `TOOL_NAME: ERROR` + `REASON: [CODE] text` + optional `DETAIL: k=v`. \
                  Error codes: DOMAIN_ERROR, OUT_OF_RANGE, DIVISION_BY_ZERO, PARSE_ERROR, INVALID_INPUT, UNKNOWN_VARIABLE, UNKNOWN_FUNCTION, OVERFLOW, NOT_IMPLEMENTED. \
@@ -2441,7 +2457,7 @@ impl ServerHandler for MathCalcServer {
                  Calculus (derivative, nthDerivative, definiteIntegral, tangentLine); \
                  Unit converter (convert, convertAutoDetect); \
                  Cooking (convertCookingVolume, convertCookingWeight, convertOvenTemperature); \
-                 Measure reference (listCategories, listUnits, getConversionFactor, explainConversion); \
+                 Measure reference (listCategories, listToolCategories, listUnits, getConversionFactor, explainConversion); \
                  DateTime (convertTimezone, formatDateTime, currentDateTime, listTimezones, dateTimeDifference); \
                  Printing tape (calculateWithTape); \
                  Graphing (plotFunction, solveEquation, findRoots); \
