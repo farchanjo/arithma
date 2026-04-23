@@ -53,14 +53,18 @@ fn parse_csv(tool: &str, label: &str, input: &str) -> Result<Vec<f64>, String> {
     Ok(out)
 }
 
-fn require_positive(tool: &str, label: &str, value: f64) -> Result<f64, String> {
-    if value > 0.0 && value.is_finite() {
+/// Accept any finite non-negative length — radius/height/side of 0 describes
+/// the degenerate figure whose area/volume/perimeter collapses to 0. Previously
+/// this rejected 0 with `DOMAIN_ERROR`, which surprised callers who expected
+/// `circleArea(0) → 0`.
+fn require_non_negative(tool: &str, label: &str, value: f64) -> Result<f64, String> {
+    if value >= 0.0 && value.is_finite() {
         Ok(value)
     } else {
         Err(error_with_detail(
             tool,
             ErrorCode::DomainError,
-            "value must be a positive finite number",
+            "value must be a non-negative finite number",
             &format!("{label}={value}"),
         ))
     }
@@ -73,7 +77,7 @@ fn format_f64(value: f64) -> String {
 #[must_use]
 pub fn circle_area(radius: &str) -> String {
     let r = match parse_f64(TOOL_CIRCLE_AREA, "radius", radius)
-        .and_then(|v| require_positive(TOOL_CIRCLE_AREA, "radius", v))
+        .and_then(|v| require_non_negative(TOOL_CIRCLE_AREA, "radius", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -86,7 +90,7 @@ pub fn circle_area(radius: &str) -> String {
 #[must_use]
 pub fn circle_perimeter(radius: &str) -> String {
     let r = match parse_f64(TOOL_CIRCLE_PERIMETER, "radius", radius)
-        .and_then(|v| require_positive(TOOL_CIRCLE_PERIMETER, "radius", v))
+        .and_then(|v| require_non_negative(TOOL_CIRCLE_PERIMETER, "radius", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -99,7 +103,7 @@ pub fn circle_perimeter(radius: &str) -> String {
 #[must_use]
 pub fn sphere_volume(radius: &str) -> String {
     let r = match parse_f64(TOOL_SPHERE_VOLUME, "radius", radius)
-        .and_then(|v| require_positive(TOOL_SPHERE_VOLUME, "radius", v))
+        .and_then(|v| require_non_negative(TOOL_SPHERE_VOLUME, "radius", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -112,7 +116,7 @@ pub fn sphere_volume(radius: &str) -> String {
 #[must_use]
 pub fn sphere_area(radius: &str) -> String {
     let r = match parse_f64(TOOL_SPHERE_AREA, "radius", radius)
-        .and_then(|v| require_positive(TOOL_SPHERE_AREA, "radius", v))
+        .and_then(|v| require_non_negative(TOOL_SPHERE_AREA, "radius", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -194,13 +198,13 @@ pub fn polygon_area(coordinates: &str) -> String {
 #[must_use]
 pub fn cone_volume(radius: &str, height: &str) -> String {
     let r = match parse_f64(TOOL_CONE_VOLUME, "radius", radius)
-        .and_then(|v| require_positive(TOOL_CONE_VOLUME, "radius", v))
+        .and_then(|v| require_non_negative(TOOL_CONE_VOLUME, "radius", v))
     {
         Ok(v) => v,
         Err(e) => return e,
     };
     let h = match parse_f64(TOOL_CONE_VOLUME, "height", height)
-        .and_then(|v| require_positive(TOOL_CONE_VOLUME, "height", v))
+        .and_then(|v| require_non_negative(TOOL_CONE_VOLUME, "height", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -213,13 +217,13 @@ pub fn cone_volume(radius: &str, height: &str) -> String {
 #[must_use]
 pub fn cylinder_volume(radius: &str, height: &str) -> String {
     let r = match parse_f64(TOOL_CYLINDER_VOLUME, "radius", radius)
-        .and_then(|v| require_positive(TOOL_CYLINDER_VOLUME, "radius", v))
+        .and_then(|v| require_non_negative(TOOL_CYLINDER_VOLUME, "radius", v))
     {
         Ok(v) => v,
         Err(e) => return e,
     };
     let h = match parse_f64(TOOL_CYLINDER_VOLUME, "height", height)
-        .and_then(|v| require_positive(TOOL_CYLINDER_VOLUME, "height", v))
+        .and_then(|v| require_non_negative(TOOL_CYLINDER_VOLUME, "height", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -293,7 +297,7 @@ pub fn regular_polygon(sides: i32, side_length: &str) -> String {
         );
     }
     let s = match parse_f64(TOOL_REGULAR_POLYGON, "sideLength", side_length)
-        .and_then(|v| require_positive(TOOL_REGULAR_POLYGON, "sideLength", v))
+        .and_then(|v| require_non_negative(TOOL_REGULAR_POLYGON, "sideLength", v))
     {
         Ok(v) => v,
         Err(e) => return e,
@@ -418,6 +422,20 @@ mod tests {
     fn triangle_area_inequality_violated() {
         let out = triangle_area("1,1,5");
         assert!(out.starts_with("TRIANGLE_AREA: ERROR"));
+    }
+
+    #[test]
+    fn circle_area_zero_radius_is_zero() {
+        // Degenerate circle: radius 0 ⇒ area 0, not a DOMAIN_ERROR.
+        approx_field(&circle_area("0"), "RESULT", 0.0);
+        approx_field(&sphere_volume("0"), "RESULT", 0.0);
+        approx_field(&sphere_area("0"), "RESULT", 0.0);
+        approx_field(&circle_perimeter("0"), "RESULT", 0.0);
+    }
+
+    #[test]
+    fn circle_area_negative_radius_still_rejected() {
+        assert!(circle_area("-1").starts_with("CIRCLE_AREA: ERROR"));
     }
 
     #[test]
