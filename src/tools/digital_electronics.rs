@@ -198,6 +198,19 @@ fn encode_to_twos(value: &str, bits: u32) -> String {
 
 fn decode_from_twos(value: &str, bits: u32) -> String {
     let trimmed = value.trim();
+    // Reject strings longer than the declared bit width: decoding
+    // `111111111` (9 bits) against `bits=8` used to silently yield 511,
+    // which isn't expressible in any 8-bit signed encoding. Shorter
+    // strings are still valid — they encode non-negative values whose
+    // top bits default to 0.
+    if trimmed.len() > bits as usize {
+        return error_with_detail(
+            TWOS_COMPLEMENT,
+            ErrorCode::OutOfRange,
+            &format!("binary string is longer than {bits}-bit width"),
+            &format!("value={value}, length={}, bits={bits}", trimmed.len()),
+        );
+    }
     let Ok(parsed) = BigInt::from_str_radix(trimmed, 2) else {
         return error_with_detail(
             TWOS_COMPLEMENT,
@@ -685,6 +698,27 @@ mod tests {
         assert_eq!(
             twos_complement("5", 8, "toward"),
             "TWOS_COMPLEMENT: ERROR\nREASON: [INVALID_INPUT] direction must be 'toTwos' or 'fromTwos'\nDETAIL: direction=toward"
+        );
+    }
+
+    #[test]
+    fn twos_complement_from_rejects_string_longer_than_bit_width() {
+        // `111111111` is 9 bits; decoding it against bits=8 used to yield 511
+        // (unsigned 9-bit value) even though 511 is outside 8-bit signed
+        // range. Now rejected with OUT_OF_RANGE.
+        let out = twos_complement("111111111", 8, "fromTwos");
+        assert!(out.starts_with("TWOS_COMPLEMENT: ERROR"));
+        assert!(out.contains("OUT_OF_RANGE"));
+        assert!(out.contains("longer than 8-bit"));
+    }
+
+    #[test]
+    fn twos_complement_from_accepts_short_string() {
+        // Short strings are still valid — they just encode non-negative
+        // values with implicit top-zero padding.
+        assert_eq!(
+            twos_complement("10", 8, "fromTwos"),
+            "TWOS_COMPLEMENT: OK | RESULT: 2"
         );
     }
 
