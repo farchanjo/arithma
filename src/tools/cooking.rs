@@ -162,11 +162,24 @@ fn validate_oven_unit(code: &str) -> Result<(), String> {
 
 fn oven_to_celsius(input: &BigDecimal, source: &str) -> Result<BigDecimal, String> {
     if source == GAS_MARK {
-        let mark = input.to_i32().ok_or_else(|| {
-            error_with_detail(
+        // Reject non-integer gas marks up front. `to_i32()` silently truncates
+        // `0.5 → 0` and `11.5 → 11`, which then surfaced as
+        // `Received: 0` / `Received: 11` — the error message lied about the
+        // caller's input. An explicit integer check preserves the original
+        // value in the DETAIL line.
+        if !input.is_integer() {
+            return Err(error_with_detail(
                 TOOL_OVEN,
                 ErrorCode::InvalidInput,
                 "gas mark must be an integer",
+                &format!("value={input}"),
+            ));
+        }
+        let mark = input.to_i32().ok_or_else(|| {
+            error_with_detail(
+                TOOL_OVEN,
+                ErrorCode::OutOfRange,
+                "gas mark does not fit in i32",
                 &format!("value={input}"),
             )
         })?;
@@ -333,5 +346,23 @@ mod tests {
             convert_oven_temperature("-10", "c", "f"),
             "CONVERT_OVEN_TEMPERATURE: OK | RESULT: 14"
         );
+    }
+
+    #[test]
+    fn oven_fractional_gas_mark_preserves_value_in_error() {
+        // `0.5` used to be silently truncated to `0` by `to_i32()` and then
+        // reported as `Received: 0`. The original fractional value must
+        // survive to the DETAIL so the caller sees what they actually sent.
+        let out = convert_oven_temperature("0.5", "gasmark", "c");
+        assert!(out.starts_with("CONVERT_OVEN_TEMPERATURE: ERROR"));
+        assert!(out.contains("gas mark must be an integer"));
+        assert!(out.contains("value=0.5"), "got: {out}");
+    }
+
+    #[test]
+    fn oven_fractional_above_range_preserves_value() {
+        let out = convert_oven_temperature("11.5", "gasmark", "c");
+        assert!(out.starts_with("CONVERT_OVEN_TEMPERATURE: ERROR"));
+        assert!(out.contains("value=11.5"), "got: {out}");
     }
 }
