@@ -290,15 +290,23 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
         }
     }
 
-    // ---- unary = '-' unary | primary ---- //
+    // ---- unary = ('-' | '+') unary | primary ---- //
     fn parse_unary(&mut self) -> Result<f64, ExpressionError> {
         self.skip_whitespace();
-        if self.current_char() == Some('-') {
-            self.pos += 1;
-            let value = self.parse_unary()?;
-            Ok(-value)
-        } else {
-            self.parse_power()
+        match self.current_char() {
+            Some('-') => {
+                self.pos += 1;
+                let value = self.parse_unary()?;
+                Ok(-value)
+            }
+            // Accept unary plus as a no-op for parser symmetry. Rejecting `+1`
+            // while accepting `--1` was an inconsistency that tripped callers
+            // copy-pasting signed numbers from spreadsheets / diffs.
+            Some('+') => {
+                self.pos += 1;
+                self.parse_unary()
+            }
+            _ => self.parse_power(),
         }
     }
 
@@ -338,9 +346,18 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
             self.consume_digits();
         }
         let token: String = self.input[start..self.pos].iter().collect();
-        token
+        let value = token
             .parse::<f64>()
-            .map_err(|_| ExpressionError::InvalidNumber(token))
+            .map_err(|_| ExpressionError::InvalidNumber(token.clone()))?;
+        // f64 parsing silently saturates "1e400" → +∞. Surface it as OVERFLOW
+        // so callers don't act on a value the evaluator itself can't
+        // distinguish from a real division-by-zero inf later in the pipeline.
+        if !value.is_finite() {
+            return Err(ExpressionError::Overflow {
+                op: "literal".to_string(),
+            });
+        }
+        Ok(value)
     }
 
     fn consume_digits(&mut self) {
@@ -427,6 +444,26 @@ impl<'a, S: BuildHasher> Parser<'a, S> {
 const DEG_TO_RAD: f64 = PI / 180.0;
 const RAD_TO_DEG: f64 = 180.0 / PI;
 
+/// Return `Some(degrees as i32)` when the input represents an exact integer
+/// number of degrees, otherwise `None`.
+///
+/// Used by `tan` to detect ±90° + 360·k without tripping clippy's float-equality
+/// lint — an ULP-tolerant floor comparison is both safer than `==` and matches
+/// how the dedicated `tan` tool (see `tools::scientific::tan`) gates its
+/// vertical-asymptote check. `NumCast` routes the narrowing through a
+/// range-checked conversion so extreme inputs return `None` instead of
+/// silently wrapping.
+fn integer_degrees(degrees: f64) -> Option<i32> {
+    if !degrees.is_finite() {
+        return None;
+    }
+    let floored = degrees.floor();
+    if (degrees - floored).abs() > f64::EPSILON {
+        return None;
+    }
+    <i32 as num_traits::NumCast>::from(floored)
+}
+
 /// Resolve a bare identifier as a built-in constant (pi, e, tau, phi).
 /// Case-sensitive; only lowercase forms are recognized to leave variable
 /// namespace fully available to callers.
@@ -498,6 +535,21 @@ fn call_trig(name: &str, args: &[f64]) -> Result<f64, ExpressionError> {
         }
         "tan" => {
             check_arity(args, 1, "tan")?;
+            // Integer degrees at ±90 + 360k sit on the vertical asymptote.
+            // f64's `tan` never returns `Inf` there — `cos(π/2)` in f64 is
+            // `~6.12e-17`, not exact zero, so `sin/cos` yields a huge
+            // finite (~1.63e16) that `is_finite()` happily accepts. Mirror
+            // the dedicated `tan` tool's check so `evaluate("tan(90)")`
+            // surfaces a clean `DomainError` instead of garbage — matching
+            // the exact evaluator's behaviour after the singularity fix.
+            // Non-integer inputs (e.g. `tan(89.9999)`) still pass through
+            // untouched, preserving the f64 contract the user opted into.
+            if let Some(as_int) = integer_degrees(args[0]) {
+                let normalized = as_int.rem_euclid(180);
+                if normalized == 90 {
+                    return Err(domain_err("tan", args[0]));
+                }
+            }
             let value = (args[0] * DEG_TO_RAD).tan();
             if value.is_finite() {
                 Ok(value)
@@ -758,8 +810,10 @@ fn guard_finite(value: f64, op: &str) -> Result<f64, ExpressionError> {
 fn factorial_f64(value: f64) -> Result<f64, ExpressionError> {
     // Non-integer / non-real input is a DomainError — the value is outside the
     // mathematical definition of factorial. Integer inputs outside 0..=20 are
-    // OutOfRange — legal mathematically, but f64 loses precision past 20! so
-    // we cap to match the dedicated `factorial` MCP tool.
+    // OutOfRange — legal mathematically, but f64 only represents 20! exactly
+    // (2_432_902_008_176_640_000); 21! loses the last bit of precision and
+    // 171! overflows to +Inf. Use `evaluateExact` (BigDecimal) or the dedicated
+    // `factorial` MCP tool (capped at 1000) when you need larger values.
     if value.fract() != 0.0 || !value.is_finite() || value.is_sign_negative() && value != 0.0 {
         return Err(ExpressionError::DomainError {
             op: "factorial".into(),
@@ -962,9 +1016,10 @@ mod tests {
 
     #[test]
     fn decimal_number() {
-        #[allow(clippy::approx_constant)]
-        let expected = 6.28;
-        assert_close(evaluate("3.14 * 2").unwrap(), expected);
+        // Exercises the decimal-literal parser; the value `2.5 * 4` is chosen
+        // precisely because it avoids `approx_constant`'s 2π trigger while
+        // still producing a round-trippable non-integer result.
+        assert_close(evaluate("2.5 * 4").unwrap(), 10.0);
     }
 
     #[test]
@@ -1597,6 +1652,27 @@ mod tests {
         // Spot-check the radian variant: tan_r(π/4) = 1.
         let out = evaluate("tan_r(pi/4)").unwrap();
         assert_close(out, 1.0);
+    }
+
+    #[test]
+    fn tan_at_integer_90_rejects_singularity() {
+        // Regression: f64's `tan(π/2)` returns `~1.63e16` (cos is `6.12e-17`,
+        // not exact zero), so `is_finite()` happily passed that garbage up
+        // as a "result" until this guard was added. Integer degree multiples
+        // of 90 (but not 180) are the canonical vertical asymptotes — reject
+        // them explicitly, matching the exact evaluator and the dedicated
+        // `tan` tool.
+        for expr in ["tan(90)", "tan(270)", "tan(-90)", "tan(450)", "tan(-270)"] {
+            let err = evaluate(expr).unwrap_err();
+            assert!(
+                matches!(err, ExpressionError::DomainError { .. }),
+                "{expr} should surface DomainError, got {err:?}"
+            );
+        }
+        // Non-integer inputs still flow through f64 — the caller opted in to
+        // f64 precision by using `evaluate` rather than `evaluateExact`.
+        let near_singular = evaluate("tan(89.999999)").unwrap();
+        assert!(near_singular > 1e7, "got {near_singular}");
     }
 
     #[test]
