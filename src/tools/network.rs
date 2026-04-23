@@ -129,21 +129,29 @@ pub fn ip_to_decimal(address: &str) -> String {
 pub fn decimal_to_ip(decimal: &str, version: i32) -> String {
     const IPV4_MAX: i64 = 0xFFFF_FFFF;
     if version == 6 {
-        BigInt::from_str(decimal).map_or_else(
-            |_| {
-                error_with_detail(
-                    DECIMAL_TO_IP,
-                    ErrorCode::ParseError,
-                    "decimal is not a valid integer",
-                    &format!("decimal={decimal}"),
-                )
-            },
-            |big| {
-                Response::ok(DECIMAL_TO_IP)
-                    .result(big_int_to_ipv6_full(&big))
-                    .build()
-            },
-        )
+        let Ok(big) = BigInt::from_str(decimal) else {
+            return error_with_detail(
+                DECIMAL_TO_IP,
+                ErrorCode::ParseError,
+                "decimal is not a valid integer",
+                &format!("decimal={decimal}"),
+            );
+        };
+        // Reject values outside the 128-bit unsigned window instead of
+        // silently wrapping modulo 2^128. `-1` used to print `::1`
+        // (wrapping_neg) and 2^128 used to print `::`; both are lies.
+        let ipv6_max: BigInt = (BigInt::one() << 128) - BigInt::one();
+        if big.is_negative() || big > ipv6_max {
+            return error_with_detail(
+                DECIMAL_TO_IP,
+                ErrorCode::OutOfRange,
+                "value does not fit in 128-bit unsigned range",
+                &format!("decimal={decimal}"),
+            );
+        }
+        Response::ok(DECIMAL_TO_IP)
+            .result(big_int_to_ipv6_full(&big))
+            .build()
     } else if version == 4 {
         let Ok(value) = decimal.parse::<i64>() else {
             return error_with_detail(
@@ -1422,6 +1430,23 @@ mod tests {
             decimal_to_ip("1", 6),
             "DECIMAL_TO_IP: OK | RESULT: 0000:0000:0000:0000:0000:0000:0000:0001"
         );
+    }
+
+    #[test]
+    fn decimal_to_ip_ipv6_max_and_edges() {
+        // 2^128 - 1 is the largest representable IPv6 address.
+        assert_eq!(
+            decimal_to_ip("340282366920938463463374607431768211455", 6),
+            "DECIMAL_TO_IP: OK | RESULT: ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        );
+        // 2^128 itself overflows — no silent wrap.
+        let over = decimal_to_ip("340282366920938463463374607431768211456", 6);
+        assert!(over.starts_with("DECIMAL_TO_IP: ERROR"), "got: {over}");
+        assert!(over.contains("OUT_OF_RANGE"));
+        // Negative input no longer becomes `::1` via wrapping_neg.
+        let neg = decimal_to_ip("-1", 6);
+        assert!(neg.starts_with("DECIMAL_TO_IP: ERROR"), "got: {neg}");
+        assert!(neg.contains("OUT_OF_RANGE"));
     }
 
     #[test]
