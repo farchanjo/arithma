@@ -70,12 +70,6 @@ jiff = { version = "0.2", features = ["serde"] }
 # Portable SIMD (auto-dispatches SSE2/AVX2/AVX-512/NEON)
 wide = "0.7"
 
-# Low-level system calls for the non-blocking stdio transport (Unix only).
-# Already a transitive dep of tokio, made explicit here because we call
-# `fcntl`/`read`/`write` directly in `transport::async_stdio`.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # Cryptographic hashes (pure-Rust RustCrypto suite)
 md-5 = "0.10"
 sha1 = "0.10"
@@ -92,6 +86,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Lazy statics for lookup tables (Rust 1.80+ has OnceLock/LazyLock in std)
+
+# Low-level system calls for the non-blocking stdio transport (Unix only).
+# Already a transitive dep of tokio, made explicit here because we call
+# `fcntl`/`read`/`write` directly in `transport::async_stdio`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 approx = "0.5"
