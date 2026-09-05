@@ -34,6 +34,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Runner services run with a non-interactive PATH that lacks cargo on
+      # the Linux and Windows hosts (macOS already exposes it). Reuse an
+      # existing rustup install when present; install once on first run.
+      - name: Ensure Rust toolchain (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Ensure Rust toolchain (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          $cargoBin = "$env:USERPROFILE\.cargo\bin"
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path "$cargoBin\cargo.exe")) {
+              Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+              & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain stable
+            }
+          }
+          Add-Content $env:GITHUB_PATH $cargoBin
+
       - name: Build (release)
         run: cargo build --release
 
