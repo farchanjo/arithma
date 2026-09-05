@@ -262,7 +262,7 @@ jobs:
           if-no-files-found: error
 
       - name: Cleanup workspace
-        if: always() && ${{ !contains(matrix.os, 'Windows') }}
+        if: always() && !contains(matrix.os, 'Windows')
         run: rm -rf target dist staging
 
       - name: Cleanup workspace (Windows)
