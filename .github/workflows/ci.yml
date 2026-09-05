@@ -1,0 +1,46 @@
+# CI for arithma — release build + full test suite on the self-hosted fleet
+# (Linux/X64, macOS/ARM64, Windows/X64).
+#
+# First iteration validates runner plumbing; fmt/clippy gates can be added
+# once the fleet is proven.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: [self-hosted, Linux]
+            py: python3
+            bin: arithma
+          - name: macos
+            os: [self-hosted, macOS]
+            py: python3
+            bin: arithma
+          - name: windows
+            os: [self-hosted, Windows]
+            py: python
+            bin: arithma.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Integration tests
+        env:
+          MATH_CALC_MCP: ${{ github.workspace }}/target/release/${{ matrix.bin }}
+        run: ${{ matrix.py }} scripts/test_stdio.py
