@@ -90,35 +90,25 @@ pub fn canonicalize_zero(value: f64) -> f64 {
 /// noise while still preserving every bit of genuine f64 information — the
 /// type only guarantees 15–17 significant digits.
 ///
-/// Zero and non-finite inputs pass through unchanged. Very small but valid
-/// results (e.g. `1e-10`) survive because the rescale tracks the value's
-/// magnitude: rounding always happens at a digit position relative to the
-/// value itself, never relative to 1.
+/// Zero and non-finite inputs pass through unchanged. Rounding goes through
+/// Rust's decimal exponent formatter (`{:.*e}`) and its correctly-rounded
+/// float parser, so the snap is bit-identical on every platform and never
+/// overflows. The earlier formulation rescaled with `10f64::powf`, which
+/// calls the C library's `pow`: on Windows (msvcrt, ~1 ULP error) the power
+/// of ten itself drifted, so canonical extreme results like `1e-200` were
+/// re-rounded onto the drifted scale factor (`9.999999999999995e-201`).
 #[must_use]
 pub fn snap_to_precision(value: f64, sig_digits: u32) -> f64 {
     if value == 0.0 || !value.is_finite() || sig_digits == 0 {
         return value;
     }
-    // Magnitude of the most significant digit (10⁰ for ~1, 10⁻⁵ for ~1e-5).
-    // `abs().log10()` is finite here because we bailed on zero above.
-    let magnitude = value.abs().log10().floor();
-    // Normalize value into approximately `[1, 10)` by dividing by
-    // `10^magnitude`. The naive formulation `value * 10^(sig_digits - 1 -
-    // magnitude)` blows up to `+∞` for tiny inputs: `snap_to_precision(2e-300,
-    // 15)` requires `10³¹⁴`, which exceeds `f64::MAX`, and the subsequent
-    // `inf / inf` collapses to `NaN`. Normalizing first keeps every
-    // intermediate inside f64's normal range.
-    let denorm = 10f64.powf(magnitude);
-    let normalized = value / denorm;
-    // At this point `|normalized|` is in `[1, 10)` (give or take a ULP from
-    // the `log10().floor()` rounding). Round at `sig_digits - 1` digits
-    // after the MSD — `10^14` for the standard 15-sig-digit snap, safely
-    // below f64::MAX.
-    let small_shift = 10f64.powf(f64::from(sig_digits) - 1.0);
-    let rounded = (normalized * small_shift).round() / small_shift;
-    // Scale back: `rounded` is normalized, multiply by the original
-    // magnitude factor to restore scale.
-    rounded * denorm
+    // `{:.Xe}` prints `X + 1` significant digits in exponent form; parsing
+    // that decimal back selects the nearest f64 (round-trip guarantee), so
+    // every value inside a 15-significant-digit basin collapses onto its
+    // canonical representative. Exponent form keeps extremes (2e-300) in
+    // range — no intermediate `10^314` overflow.
+    let precision = (sig_digits - 1) as usize;
+    format!("{:.*e}", precision, value).parse().unwrap_or(value)
 }
 
 #[cfg(test)]
