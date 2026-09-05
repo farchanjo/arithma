@@ -1,19 +1,64 @@
 # CI for arithma — release build + full test suite on the self-hosted fleet
 # (Linux/X64, macOS/ARM64, Windows/X64).
 #
-# First iteration validates runner plumbing; fmt/clippy gates can be added
-# once the fleet is proven.
+# - push to main / workflow_dispatch: build + unit + integration tests only.
+# - push of a v* tag: same suites against the portable release build, then a
+#   GitHub Release with per-platform archives and SHA-256 checksums.
+# - Every job ends with a workspace cleanup (runners are long-lived machines).
 
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+# One run per ref; a newer push supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Extension keys: steps shared between the test and release jobs. The runner
+# services start steps with a PATH that lacks cargo on Linux and Windows
+# (macOS already exposes it). Reuse an existing rustup install when present;
+# install once on first run.
+x-bootstrap:
+  linux: &bootstrap-linux
+    name: Ensure Rust toolchain (Linux)
+    if: matrix.name == 'linux'
+    run: |
+      set -euo pipefail
+      # The runner service may start steps with HOME unset; rustup then
+      # falls back to the passwd entry, so resolve the same directory
+      # explicitly instead of trusting $HOME.
+      HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
+      export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+      export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+      export PATH="$CARGO_HOME/bin:$PATH"
+      if ! command -v cargo >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      fi
+      cargo --version
+      echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+  windows: &bootstrap-windows
+    name: Ensure Rust toolchain (Windows)
+    if: matrix.name == 'windows'
+    shell: powershell
+    run: |
+      $cargoBin = "$env:USERPROFILE\.cargo\bin"
+      if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path "$cargoBin\cargo.exe")) {
+          Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+          & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain stable
+        }
+      }
+      Add-Content $env:GITHUB_PATH $cargoBin
 
 jobs:
   build-test:
     name: build-test (${{ matrix.name }})
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -34,38 +79,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Runner services run with a non-interactive PATH that lacks cargo on
-      # the Linux and Windows hosts (macOS already exposes it). Reuse an
-      # existing rustup install when present; install once on first run.
-      - name: Ensure Rust toolchain (Linux)
-        if: matrix.name == 'linux'
-        run: |
-          set -euo pipefail
-          # The runner service may start steps with HOME unset; rustup then
-          # falls back to the passwd entry, so resolve the same directory
-          # explicitly instead of trusting $HOME.
-          HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
-          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-          export PATH="$CARGO_HOME/bin:$PATH"
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          fi
-          cargo --version
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-
-      - name: Ensure Rust toolchain (Windows)
-        if: matrix.name == 'windows'
-        shell: powershell
-        run: |
-          $cargoBin = "$env:USERPROFILE\.cargo\bin"
-          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-            if (-not (Test-Path "$cargoBin\cargo.exe")) {
-              Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
-              & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain stable
-            }
-          }
-          Add-Content $env:GITHUB_PATH $cargoBin
+      - *bootstrap-linux
+      - *bootstrap-windows
 
       - name: Build (release)
         run: cargo build --release
@@ -77,3 +92,158 @@ jobs:
         env:
           MATH_CALC_MCP: ${{ github.workspace }}/target/release/${{ matrix.bin }}
         run: ${{ matrix.py }} scripts/test_stdio.py
+
+      # Long-lived runners: free the disk for the next job. Git bash is not
+      # on PATH on the Windows runner, so cleanup there stays on PowerShell.
+      - name: Cleanup workspace
+        if: always() && matrix.name != 'windows'
+        run: rm -rf target dist staging
+        shell: bash
+
+      - name: Cleanup workspace (Windows)
+        if: always() && matrix.name == 'windows'
+        shell: powershell
+        run: Remove-Item -Recurse -Force target, dist -ErrorAction SilentlyContinue
+
+  # Tag-triggered: portable binaries + GitHub Release with checksums.
+  package:
+    name: package (${{ matrix.name }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: [self-hosted, Linux]
+            target: x86_64-unknown-linux-gnu
+            portable: true
+            ext: tar.gz
+            py: python3
+            bin: arithma
+          - name: macos
+            os: [self-hosted, macOS]
+            target: aarch64-apple-darwin
+            portable: false
+            ext: tar.gz
+            py: python3
+            bin: arithma
+          - name: windows
+            os: [self-hosted, Windows]
+            target: x86_64-pc-windows-msvc
+            portable: true
+            ext: zip
+            py: python
+            bin: arithma.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - *bootstrap-linux
+      - *bootstrap-windows
+
+      - name: Verify tag matches Cargo.toml (Unix)
+        if: matrix.name != 'windows'
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version v$VERSION" >&2
+            exit 1
+          fi
+
+      - name: Verify tag matches Cargo.toml (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            Write-Error "tag $env:GITHUB_REF_NAME does not match Cargo.toml version v$version"
+            exit 1
+          }
+
+      # .cargo/config.toml pins -C target-cpu=native via target."cfg(all())",
+      # which outranks the RUSTFLAGS env var in cargo's precedence rules; the
+      # CLI --config is the only construct that beats it.
+      - name: Build portable binary (Unix)
+        if: matrix.name != 'windows'
+        run: |
+          set -euo pipefail
+          if [ '${{ matrix.portable }}' = 'true' ]; then
+            cargo build --profile release-portable \
+              --config 'target."cfg(all())".rustflags=["-C","target-cpu=x86-64-v3"]'
+          else
+            cargo build --profile release-portable
+          fi
+
+      - name: Build portable binary (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          if ('${{ matrix.portable }}' -eq 'true') {
+            cargo build --profile release-portable --config 'target."cfg(all())".rustflags=["-C","target-cpu=x86-64-v3"]'
+          } else {
+            cargo build --profile release-portable
+          }
+
+      - name: Integration tests against packaged binary
+        env:
+          MATH_CALC_MCP: ${{ github.workspace }}/target/release-portable/${{ matrix.bin }}
+        run: ${{ matrix.py }} scripts/test_stdio.py
+
+      - name: Package archive (Unix)
+        if: matrix.name != 'windows'
+        run: |
+          set -euo pipefail
+          ARCHIVE=arithma-${GITHUB_REF_NAME}-${{ matrix.name }}-${{ matrix.target }}.${{ matrix.ext }}
+          mkdir -p dist staging
+          cp target/release-portable/${{ matrix.bin }} staging/
+          cp README.md LICENSE staging/
+          # macOS bsdtar would otherwise embed AppleDouble ._ sidecars.
+          COPYFILE_DISABLE=1 tar -C staging -czf "dist/$ARCHIVE" .
+          (cd dist && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256")
+          ls -l dist
+
+      - name: Package archive (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          $archive = "arithma-$env:GITHUB_REF_NAME-windows-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force dist, staging | Out-Null
+          Copy-Item target\release-portable\arithma.exe, README.md, LICENSE staging
+          Compress-Archive -Path staging\* -DestinationPath "dist\$archive" -Force
+          (Get-FileHash -Algorithm SHA256 "dist\$archive").Hash | Out-File -Encoding ascii "dist\$archive.sha256"
+          Get-ChildItem dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Cleanup workspace
+        if: always() && matrix.name != 'windows'
+        run: rm -rf target dist staging
+
+      - name: Cleanup workspace (Windows)
+        if: always() && matrix.name == 'windows'
+        shell: powershell
+        run: Remove-Item -Recurse -Force target, dist, staging -ErrorAction SilentlyContinue
+
+  release:
+    name: release
+    needs: package
+    runs-on: [self-hosted, Linux]
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          generate_release_notes: true
