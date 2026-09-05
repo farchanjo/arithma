@@ -110,21 +110,21 @@ jobs:
           - name: linux
             os: [self-hosted, Linux]
             target: x86_64-unknown-linux-gnu
-            portable: true
+            cpu: x86-64-v4
             ext: tar.gz
             py: python3
             bin: arithma
           - name: macos
             os: [self-hosted, macOS]
             target: aarch64-apple-darwin
-            portable: false
+            cpu: apple-m4
             ext: tar.gz
             py: python3
             bin: arithma
           - name: windows
             os: [self-hosted, Windows]
             target: x86_64-pc-windows-msvc
-            portable: true
+            cpu: x86-64-v4
             ext: zip
             py: python
             bin: arithma.exe
@@ -178,32 +178,27 @@ jobs:
             exit 1
           }
 
-      # Portable builds must beat -C target-cpu=native from .cargo/config.toml.
-      # Inline `cargo --config 'target."cfg(all())"...'` loses its quotes on
-      # the PowerShell argument boundary, so pass a config FILE instead —
-      # `--config <path>` layers after the project config, and rustc keeps
-      # the last -C target-cpu flag. The path must contain no spaces.
-      - name: Build portable binary (Unix)
+      # Release binaries are tuned for the AVX-512 baseline (x86-64-v4) and
+      # Apple M4 (the fleet's own CPUs; verified AVX-512 executes in both the
+      # Linux LXC and the Windows VM's cpu=host passthrough). The -C target-cpu
+      # comes from the matrix and MUST beat -C target-cpu=native in
+      # .cargo/config.toml. PowerShell drops the embedded quotes from an inline
+      # --config 'target."cfg(all())"...' argument, so pass a config FILE —
+      # layered after the project config, rustc keeps the LAST -C target-cpu.
+      # The path must contain no spaces.
+      - name: Build release binary (Unix)
         if: matrix.name != 'windows'
         run: |
           set -euo pipefail
-          if [ '${{ matrix.portable }}' = 'true' ]; then
-            printf '[target."cfg(all())"]\nrustflags = ["-C","target-cpu=x86-64-v3"]\n' > portable-cpu.toml
-            cargo build --profile release-portable --config portable-cpu.toml
-          else
-            cargo build --profile release-portable
-          fi
+          printf '[target."cfg(all())"]\nrustflags = ["-C","target-cpu=${{ matrix.cpu }}"]\n' > release-cpu.toml
+          cargo build --profile release-portable --config release-cpu.toml
 
-      - name: Build portable binary (Windows)
+      - name: Build release binary (Windows)
         if: matrix.name == 'windows'
         shell: powershell
         run: |
-          if ('${{ matrix.portable }}' -eq 'true') {
-            Set-Content -Path portable-cpu.toml -Encoding ascii -Value @('[target."cfg(all())"]', 'rustflags = ["-C","target-cpu=x86-64-v3"]')
-            cargo build --profile release-portable --config portable-cpu.toml
-          } else {
-            cargo build --profile release-portable
-          }
+          Set-Content -Path release-cpu.toml -Encoding ascii -Value @('[target."cfg(all())"]', 'rustflags = ["-C","target-cpu=${{ matrix.cpu }}"]')
+          cargo build --profile release-portable --config release-cpu.toml
 
       - name: Integration tests against packaged binary
         env:
