@@ -178,16 +178,18 @@ jobs:
             exit 1
           }
 
-      # .cargo/config.toml pins -C target-cpu=native via target."cfg(all())",
-      # which outranks the RUSTFLAGS env var in cargo's precedence rules; the
-      # CLI --config is the only construct that beats it.
+      # Portable builds must beat -C target-cpu=native from .cargo/config.toml.
+      # Inline `cargo --config 'target."cfg(all())"...'` loses its quotes on
+      # the PowerShell argument boundary, so pass a config FILE instead —
+      # `--config <path>` layers after the project config, and rustc keeps
+      # the last -C target-cpu flag. The path must contain no spaces.
       - name: Build portable binary (Unix)
         if: matrix.name != 'windows'
         run: |
           set -euo pipefail
           if [ '${{ matrix.portable }}' = 'true' ]; then
-            cargo build --profile release-portable \
-              --config 'target."cfg(all())".rustflags=["-C","target-cpu=x86-64-v3"]'
+            printf '[target."cfg(all())"]\nrustflags = ["-C","target-cpu=x86-64-v3"]\n' > portable-cpu.toml
+            cargo build --profile release-portable --config portable-cpu.toml
           else
             cargo build --profile release-portable
           fi
@@ -197,7 +199,8 @@ jobs:
         shell: powershell
         run: |
           if ('${{ matrix.portable }}' -eq 'true') {
-            cargo build --profile release-portable --config 'target."cfg(all())".rustflags=["-C","target-cpu=x86-64-v3"]'
+            Set-Content -Path portable-cpu.toml -Encoding ascii -Value @('[target."cfg(all())"]', 'rustflags = ["-C","target-cpu=x86-64-v3"]')
+            cargo build --profile release-portable --config portable-cpu.toml
           } else {
             cargo build --profile release-portable
           }
