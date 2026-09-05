@@ -107,24 +107,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux
+          # Two CPU baselines per OS: performance build and compatibility
+          # build. macOS has no x86-style ISA levels, so m1 (all Apple
+          # Silicon) stands in for the compatibility tier.
+          - name: linux-v4
             os: [self-hosted, Linux]
             target: x86_64-unknown-linux-gnu
             cpu: x86-64-v4
             ext: tar.gz
             py: python3
             bin: arithma
-          - name: macos
+          - name: linux-v3
+            os: [self-hosted, Linux]
+            target: x86_64-unknown-linux-gnu
+            cpu: x86-64-v3
+            ext: tar.gz
+            py: python3
+            bin: arithma
+          - name: macos-m4
             os: [self-hosted, macOS]
             target: aarch64-apple-darwin
             cpu: apple-m4
             ext: tar.gz
             py: python3
             bin: arithma
-          - name: windows
+          - name: macos-m1
+            os: [self-hosted, macOS]
+            target: aarch64-apple-darwin
+            cpu: apple-m1
+            ext: tar.gz
+            py: python3
+            bin: arithma
+          - name: windows-v4
             os: [self-hosted, Windows]
-            target: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-gnu
             cpu: x86-64-v4
+            ext: zip
+            py: python
+            bin: arithma.exe
+          - name: windows-v3
+            os: [self-hosted, Windows]
+            target: x86_64-pc-windows-gnu
+            cpu: x86-64-v3
             ext: zip
             py: python
             bin: arithma.exe
@@ -132,7 +156,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Ensure Rust toolchain (Linux)
-        if: matrix.name == 'linux'
+        if: contains(matrix.os, 'Linux')
         run: |
           set -euo pipefail
           HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
@@ -146,7 +170,7 @@ jobs:
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Ensure Rust toolchain (Windows)
-        if: matrix.name == 'windows'
+        if: contains(matrix.os, 'Windows')
         shell: powershell
         run: |
           $cargoBin = "$env:USERPROFILE\.cargo\bin"
@@ -159,7 +183,7 @@ jobs:
           Add-Content $env:GITHUB_PATH $cargoBin
 
       - name: Verify tag matches Cargo.toml (Unix)
-        if: matrix.name != 'windows'
+        if: ${{ !contains(matrix.os, 'Windows') }}
         run: |
           set -euo pipefail
           VERSION=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
@@ -169,7 +193,7 @@ jobs:
           fi
 
       - name: Verify tag matches Cargo.toml (Windows)
-        if: matrix.name == 'windows'
+        if: contains(matrix.os, 'Windows')
         shell: powershell
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
@@ -178,23 +202,24 @@ jobs:
             exit 1
           }
 
-      # Release binaries are tuned for the AVX-512 baseline (x86-64-v4) and
-      # Apple M4 (the fleet's own CPUs; verified AVX-512 executes in both the
-      # Linux LXC and the Windows VM's cpu=host passthrough). The -C target-cpu
-      # comes from the matrix and MUST beat -C target-cpu=native in
-      # .cargo/config.toml. PowerShell drops the embedded quotes from an inline
-      # --config 'target."cfg(all())"...' argument, so pass a config FILE —
-      # layered after the project config, rustc keeps the LAST -C target-cpu.
-      # The path must contain no spaces.
+      # Release binaries ship in two CPU tiers per OS: performance (x86-64-v4
+      # = AVX-512, apple-m4) and compatibility (x86-64-v3 = AVX2, apple-m1 =
+      # baseline of all Apple Silicon). AVX-512 executes on the fleet's Ryzen
+      # 9 7950X (verified in the Linux LXC and the Windows cpu=host VM).
+      # The -C target-cpu comes from the matrix and MUST beat -C
+      # target-cpu=native in .cargo/config.toml. PowerShell drops the embedded
+      # quotes from an inline --config 'target."cfg(all())"...' argument, so
+      # pass a config FILE — layered after the project config, rustc keeps
+      # the LAST -C target-cpu. The path must contain no spaces.
       - name: Build release binary (Unix)
-        if: matrix.name != 'windows'
+        if: ${{ !contains(matrix.os, 'Windows') }}
         run: |
           set -euo pipefail
           printf '[target."cfg(all())"]\nrustflags = ["-C","target-cpu=${{ matrix.cpu }}"]\n' > release-cpu.toml
           cargo build --profile release-portable --config release-cpu.toml
 
       - name: Build release binary (Windows)
-        if: matrix.name == 'windows'
+        if: contains(matrix.os, 'Windows')
         shell: powershell
         run: |
           Set-Content -Path release-cpu.toml -Encoding ascii -Value @('[target."cfg(all())"]', 'rustflags = ["-C","target-cpu=${{ matrix.cpu }}"]')
@@ -206,7 +231,7 @@ jobs:
         run: ${{ matrix.py }} scripts/test_stdio.py
 
       - name: Package archive (Unix)
-        if: matrix.name != 'windows'
+        if: ${{ !contains(matrix.os, 'Windows') }}
         run: |
           set -euo pipefail
           ARCHIVE=arithma-${GITHUB_REF_NAME}-${{ matrix.name }}-${{ matrix.target }}.${{ matrix.ext }}
@@ -219,10 +244,10 @@ jobs:
           ls -l dist
 
       - name: Package archive (Windows)
-        if: matrix.name == 'windows'
+        if: contains(matrix.os, 'Windows')
         shell: powershell
         run: |
-          $archive = "arithma-$env:GITHUB_REF_NAME-windows-${{ matrix.target }}.zip"
+          $archive = "arithma-$env:GITHUB_REF_NAME-${{ matrix.name }}-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Force dist, staging | Out-Null
           Copy-Item target\release-portable\arithma.exe, README.md, LICENSE staging
           Compress-Archive -Path staging\* -DestinationPath "dist\$archive" -Force
@@ -237,11 +262,11 @@ jobs:
           if-no-files-found: error
 
       - name: Cleanup workspace
-        if: always() && matrix.name != 'windows'
+        if: always() && ${{ !contains(matrix.os, 'Windows') }}
         run: rm -rf target dist staging
 
       - name: Cleanup workspace (Windows)
-        if: always() && matrix.name == 'windows'
+        if: always() && contains(matrix.os, 'Windows')
         shell: powershell
         run: Remove-Item -Recurse -Force target, dist, staging -ErrorAction SilentlyContinue
 
