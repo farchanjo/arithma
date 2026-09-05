@@ -27,6 +27,13 @@ import threading
 import time
 from subprocess import PIPE
 
+# Test labels carry non-ASCII glyphs (φ, ±, °). The Windows console defaults
+# to cp1252, where print() raises UnicodeEncodeError and kills the run
+# mid-suite. Force UTF-8 on the report streams regardless of console codepage.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 BINARY = os.environ.get(
     "MATH_CALC_MCP",
     os.path.join(os.path.dirname(__file__), "..", "target", "release", "arithma"),
